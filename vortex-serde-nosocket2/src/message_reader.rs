@@ -23,6 +23,14 @@ pub struct MessageReader<R> {
     finished: bool,
 }
 
+pub fn read_dtype(buf: &[u8]) -> VortexResult<DType> {
+    let msg = unsafe { root_unchecked::<fb::Message>(&buf) }
+        .header_as_schema()
+        .expect("Checked earlier in the function");
+
+    Ok(IPCDType::read_flatbuffer(&msg)?.0)
+}
+
 impl<R: VortexRead> MessageReader<R> {
     pub async fn try_new(read: R) -> VortexResult<Self> {
         let mut reader = Self {
