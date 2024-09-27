@@ -23,14 +23,6 @@ pub struct MessageReader<R> {
     finished: bool,
 }
 
-pub fn read_dtype(buf: &[u8]) -> VortexResult<DType> {
-    let msg = unsafe { root_unchecked::<fb::Message>(&buf) }
-        .header_as_schema()
-        .expect("Checked earlier in the function");
-
-    Ok(IPCDType::read_flatbuffer(&msg)?.0)
-}
-
 impl<R: VortexRead> MessageReader<R> {
     pub async fn try_new(read: R) -> VortexResult<Self> {
         let mut reader = Self {
@@ -223,6 +215,53 @@ pub enum ReadState {
     ReadingFb,
     ReadingBuffers,
     Finished,
+}
+
+pub struct DTypeReader {
+    state: ReadState,
+    dtype: DType,
+}
+
+impl Default for DTypeReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DTypeReader {
+    pub fn new() -> Self {
+        Self {
+            state: ReadState::Init,
+            dtype: DType::Null,
+        }
+    }
+
+    pub fn read(&mut self, mut bytes: Bytes) -> VortexResult<Option<usize>> {
+        match self.state {
+            ReadState::Init => {
+                self.state = ReadState::ReadingLength;
+                Ok(Some(FLATBUFFER_SIZE_LENGTH))
+            }
+            ReadState::ReadingLength => {
+                self.state = ReadState::ReadingFb;
+                Ok(Some(bytes.get_u32_le() as usize))
+            }
+            ReadState::ReadingFb => {
+                let schema = root::<fb::Message>(&bytes)?
+                    .header_as_schema()
+                    .ok_or_else(|| vortex_err!("Message was not a schema"))?;
+                self.dtype = IPCDType::read_flatbuffer(&schema)?.0;
+                self.state = ReadState::Finished;
+                Ok(None)
+            }
+            ReadState::Finished => vortex_bail!("Reader is already finished"),
+            _ => unreachable!("Invalid state"),
+        }
+    }
+
+    pub fn into_dtype(self) -> DType {
+        self.dtype
+    }
 }
 
 pub struct ArrayBufferReader {
