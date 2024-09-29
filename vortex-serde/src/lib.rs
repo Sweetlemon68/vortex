@@ -1,5 +1,5 @@
-use message_reader::*;
-use message_writer::*;
+pub use message_reader::*;
+pub use message_writer::*;
 
 pub mod chunked_reader;
 mod dtype_reader;
