@@ -4677,41 +4677,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vortex-serde-nosocket2"
-version = "0.7.0"
-dependencies = [
- "ahash",
- "arrow",
- "arrow-array",
- "arrow-ipc",
- "arrow-schema",
- "arrow-select",
- "bytes",
- "criterion",
- "flatbuffers",
- "futures",
- "futures-executor",
- "futures-util",
- "itertools 0.13.0",
- "monoio",
- "object_store",
- "pin-project",
- "rand",
- "simplelog",
- "tokio",
- "vortex-alp",
- "vortex-array",
- "vortex-buffer",
- "vortex-dtype",
- "vortex-error",
- "vortex-expr",
- "vortex-fastlanes",
- "vortex-flatbuffers",
- "vortex-sampling-compressor",
- "vortex-scalar",
-]
-
-[[package]]
 name = "vortex-zigzag"
 version = "0.11.0"
 dependencies = [
