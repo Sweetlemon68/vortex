@@ -2,7 +2,7 @@ use std::iter;
 
 use vortex_dtype::{match_each_native_ptype, DType, Nullability, PType};
 use vortex_error::{vortex_bail, VortexResult};
-use vortex_scalar::{BoolScalar, Utf8Scalar};
+use vortex_scalar::{BinaryScalar, BoolScalar, Utf8Scalar};
 
 use crate::array::constant::ConstantArray;
 use crate::array::primitive::PrimitiveArray;
@@ -29,12 +29,22 @@ impl IntoCanonical for ConstantArray {
         }
 
         if let Ok(s) = Utf8Scalar::try_from(self.scalar()) {
-            let const_value = s.value().unwrap();
-            let bytes = const_value.as_bytes();
+            let value = s.value();
+            let const_value = value.as_ref().map(|v| v.as_bytes());
 
             return Ok(Canonical::VarBin(VarBinArray::from_iter(
-                iter::repeat(Some(bytes)).take(self.len()),
+                iter::repeat(const_value).take(self.len()),
                 DType::Utf8(validity.nullability()),
+            )));
+        }
+
+        if let Ok(b) = BinaryScalar::try_from(self.scalar()) {
+            let value = b.value();
+            let const_value = value.as_ref().map(|v| v.as_slice());
+
+            return Ok(Canonical::VarBin(VarBinArray::from_iter(
+                iter::repeat(const_value).take(self.len()),
+                DType::Binary(validity.nullability()),
             )));
         }
 

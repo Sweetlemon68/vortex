@@ -5,13 +5,17 @@ use serde::{Deserialize, Serialize};
 pub use stats::compute_stats;
 use vortex_buffer::Buffer;
 use vortex_dtype::{match_each_native_ptype, DType, NativePType, Nullability};
-use vortex_error::{vortex_bail, VortexError, VortexResult};
+use vortex_error::{
+    vortex_bail, vortex_err, vortex_panic, VortexError, VortexExpect as _, VortexResult,
+    VortexUnwrap as _,
+};
 use vortex_scalar::Scalar;
 
 use crate::array::primitive::PrimitiveArray;
 use crate::array::varbin::builder::VarBinBuilder;
 use crate::compute::slice;
 use crate::compute::unary::scalar_at;
+use crate::encoding::ids;
 use crate::stats::StatsSet;
 use crate::validity::{Validity, ValidityMetadata};
 use crate::{impl_encoding, Array, ArrayDType, ArrayDef, ArrayTrait, IntoArrayVariant};
@@ -24,7 +28,7 @@ mod flatten;
 mod stats;
 mod variants;
 
-impl_encoding!("vortex.varbin", 4u16, VarBin);
+impl_encoding!("vortex.varbin", ids::VAR_BIN, VarBin);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VarBinMetadata {
@@ -73,9 +77,9 @@ impl VarBinArray {
 
     #[inline]
     pub fn offsets(&self) -> Array {
-        self.array()
+        self.as_ref()
             .child(0, &self.metadata().offsets_dtype, self.len() + 1)
-            .expect("missing offsets")
+            .vortex_expect("Missing offsets in VarBinArray")
     }
 
     pub fn first_offset<T: NativePType + for<'a> TryFrom<&'a Scalar, Error = VortexError>>(
@@ -87,25 +91,36 @@ impl VarBinArray {
             .try_into()
     }
 
+    /// Access the value bytes child array
+    ///
+    /// # Note
+    ///
+    /// Bytes child array is never sliced when the array is sliced so this can include values
+    /// that are not logically present in the array. Users should prefer [sliced_bytes][Self::sliced_bytes]
+    /// unless they're resolving values via offset child array.
     #[inline]
     pub fn bytes(&self) -> Array {
-        self.array()
+        self.as_ref()
             .child(1, &DType::BYTES, self.metadata().bytes_len)
-            .expect("missing bytes")
+            .vortex_expect("Missing bytes in VarBinArray")
     }
 
     pub fn validity(&self) -> Validity {
-        self.metadata()
-            .validity
-            .to_validity(self.array().child(2, &Validity::DTYPE, self.len()))
+        self.metadata().validity.to_validity(|| {
+            self.as_ref()
+                .child(2, &Validity::DTYPE, self.len())
+                .vortex_expect("VarBinArray: validity child")
+        })
     }
 
+    /// Access value bytes child array limited to values that are logically present in
+    /// the array unlike [bytes][Self::bytes].
     pub fn sliced_bytes(&self) -> VortexResult<Array> {
         let first_offset: usize = scalar_at(&self.offsets(), 0)?.as_ref().try_into()?;
         let last_offset: usize = scalar_at(&self.offsets(), self.offsets().len() - 1)?
             .as_ref()
             .try_into()?;
-        slice(&self.bytes(), first_offset, last_offset)
+        slice(self.bytes(), first_offset, last_offset)
     }
 
     pub fn from_vec<T: AsRef<[u8]>>(vec: Vec<T>, dtype: DType) -> Self {
@@ -129,6 +144,7 @@ impl VarBinArray {
         builder.finish(dtype)
     }
 
+    #[allow(clippy::same_name_method)]
     pub fn from_iter<T: AsRef<[u8]>, I: IntoIterator<Item = Option<T>>>(
         iter: I,
         dtype: DType,
@@ -151,17 +167,19 @@ impl VarBinArray {
             })
             .unwrap_or_else(|| {
                 scalar_at(&self.offsets(), index)
-                    .unwrap()
+                    .unwrap_or_else(|err| {
+                        vortex_panic!(err, "Failed to get offset at index: {}", index)
+                    })
                     .as_ref()
                     .try_into()
-                    .unwrap()
+                    .vortex_expect("Failed to convert offset to usize")
             })
     }
 
     pub fn bytes_at(&self, index: usize) -> VortexResult<Buffer> {
         let start = self.offset_at(index);
         let end = self.offset_at(index + 1);
-        let sliced = slice(&self.bytes(), start, end)?;
+        let sliced = slice(self.bytes(), start, end)?;
         Ok(sliced.into_primitive()?.buffer().clone())
     }
 }
@@ -218,7 +236,9 @@ impl<'a> FromIterator<Option<&'a str>> for VarBinArray {
 
 pub fn varbin_scalar(value: Buffer, dtype: &DType) -> Scalar {
     if matches!(dtype, DType::Utf8(_)) {
-        Scalar::try_utf8(value, dtype.nullability()).unwrap()
+        Scalar::try_utf8(value, dtype.nullability())
+            .map_err(|err| vortex_err!("Failed to create scalar from utf8 buffer: {}", err))
+            .vortex_unwrap()
     } else {
         Scalar::binary(value, dtype.nullability())
     }
@@ -226,6 +246,7 @@ pub fn varbin_scalar(value: Buffer, dtype: &DType) -> Scalar {
 
 #[cfg(test)]
 mod test {
+    use rstest::{fixture, rstest};
     use vortex_dtype::{DType, Nullability};
 
     use crate::array::primitive::PrimitiveArray;
@@ -235,6 +256,7 @@ mod test {
     use crate::validity::Validity;
     use crate::{Array, IntoArray};
 
+    #[fixture]
     fn binary_array() -> Array {
         let values = PrimitiveArray::from(
             "hello worldhello world this is a long string"
@@ -253,20 +275,19 @@ mod test {
         .into_array()
     }
 
-    #[test]
-    pub fn test_scalar_at() {
-        let binary_arr = binary_array();
-        assert_eq!(binary_arr.len(), 2);
-        assert_eq!(scalar_at(&binary_arr, 0).unwrap(), "hello world".into());
+    #[rstest]
+    pub fn test_scalar_at(binary_array: Array) {
+        assert_eq!(binary_array.len(), 2);
+        assert_eq!(scalar_at(&binary_array, 0).unwrap(), "hello world".into());
         assert_eq!(
-            scalar_at(&binary_arr, 1).unwrap(),
+            scalar_at(&binary_array, 1).unwrap(),
             "hello world this is a long string".into()
         )
     }
 
-    #[test]
-    pub fn slice_array() {
-        let binary_arr = slice(&binary_array(), 1, 2).unwrap();
+    #[rstest]
+    pub fn slice_array(binary_array: Array) {
+        let binary_arr = slice(&binary_array, 1, 2).unwrap();
         assert_eq!(
             scalar_at(&binary_arr, 0).unwrap(),
             "hello world this is a long string".into()

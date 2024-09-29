@@ -1,12 +1,7 @@
 use core::fmt;
 use std::fmt::{Display, Formatter};
-use std::ops;
 
-use vortex_dtype::NativePType;
-
-use crate::expressions::Predicate;
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Operator {
     // comparison
@@ -16,6 +11,9 @@ pub enum Operator {
     Gte,
     Lt,
     Lte,
+    // boolean algebra
+    And,
+    Or,
 }
 
 impl Display for Operator {
@@ -27,51 +25,37 @@ impl Display for Operator {
             Operator::Gte => ">=",
             Operator::Lt => "<",
             Operator::Lte => "<=",
+            Operator::And => "and",
+            Operator::Or => "or",
         };
-        write!(f, "{display}")
-    }
-}
-
-impl ops::Not for Predicate {
-    type Output = Self;
-
-    fn not(self) -> Self::Output {
-        let inverse_op = match self.op {
-            Operator::Eq => Operator::NotEq,
-            Operator::NotEq => Operator::Eq,
-            Operator::Gt => Operator::Lte,
-            Operator::Gte => Operator::Lt,
-            Operator::Lt => Operator::Gte,
-            Operator::Lte => Operator::Gt,
-        };
-        Predicate {
-            lhs: self.lhs,
-            op: inverse_op,
-            rhs: self.rhs,
-        }
+        Display::fmt(display, f)
     }
 }
 
 impl Operator {
-    pub fn inverse(self) -> Self {
+    pub fn inverse(self) -> Option<Self> {
         match self {
-            Operator::Eq => Operator::NotEq,
-            Operator::NotEq => Operator::Eq,
-            Operator::Gt => Operator::Lte,
-            Operator::Gte => Operator::Lt,
-            Operator::Lt => Operator::Gte,
-            Operator::Lte => Operator::Gt,
+            Operator::Eq => Some(Operator::NotEq),
+            Operator::NotEq => Some(Operator::Eq),
+            Operator::Gt => Some(Operator::Lte),
+            Operator::Gte => Some(Operator::Lt),
+            Operator::Lt => Some(Operator::Gte),
+            Operator::Lte => Some(Operator::Gt),
+            Operator::And | Operator::Or => None,
         }
     }
 
-    pub fn to_predicate<T: NativePType>(&self) -> fn(&T, &T) -> bool {
+    /// Change the sides of the operator, where changing lhs and rhs won't change the result of the operation
+    pub fn swap(self) -> Self {
         match self {
-            Operator::Eq => PartialEq::eq,
-            Operator::NotEq => PartialEq::ne,
-            Operator::Gt => PartialOrd::gt,
-            Operator::Gte => PartialOrd::ge,
-            Operator::Lt => PartialOrd::lt,
-            Operator::Lte => PartialOrd::le,
+            Operator::Eq => Operator::Eq,
+            Operator::NotEq => Operator::NotEq,
+            Operator::Gt => Operator::Lt,
+            Operator::Gte => Operator::Lte,
+            Operator::Lt => Operator::Gt,
+            Operator::Lte => Operator::Gte,
+            Operator::And => Operator::And,
+            Operator::Or => Operator::Or,
         }
     }
 }

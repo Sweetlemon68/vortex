@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::Hash;
 use std::panic::RefUnwindSafe;
@@ -30,7 +31,6 @@ pub enum PType {
 pub trait NativePType:
     Send
     + Sync
-    + Sized
     + Clone
     + Copy
     + Debug
@@ -46,12 +46,50 @@ pub trait NativePType:
     + TryFromBytes
 {
     const PTYPE: PType;
+
+    fn is_nan(self) -> bool;
+
+    fn compare(self, other: Self) -> Ordering;
+
+    fn is_eq(self, other: Self) -> bool;
 }
 
 macro_rules! native_ptype {
     ($T:ty, $ptype:tt) => {
         impl NativePType for $T {
             const PTYPE: PType = PType::$ptype;
+
+            fn is_nan(self) -> bool {
+                false
+            }
+
+            fn compare(self, other: Self) -> Ordering {
+                self.cmp(&other)
+            }
+
+            fn is_eq(self, other: Self) -> bool {
+                self == other
+            }
+        }
+    };
+}
+
+macro_rules! native_float_ptype {
+    ($T:ty, $ptype:tt) => {
+        impl NativePType for $T {
+            const PTYPE: PType = PType::$ptype;
+
+            fn is_nan(self) -> bool {
+                <$T>::is_nan(self)
+            }
+
+            fn compare(self, other: Self) -> Ordering {
+                self.total_cmp(&other)
+            }
+
+            fn is_eq(self, other: Self) -> bool {
+                self.to_bits() == other.to_bits()
+            }
         }
     };
 }
@@ -64,9 +102,9 @@ native_ptype!(i8, I8);
 native_ptype!(i16, I16);
 native_ptype!(i32, I32);
 native_ptype!(i64, I64);
-native_ptype!(f16, F16);
-native_ptype!(f32, F32);
-native_ptype!(f64, F64);
+native_float_ptype!(f16, F16);
+native_float_ptype!(f32, F32);
+native_float_ptype!(f64, F64);
 
 #[macro_export]
 macro_rules! match_each_native_ptype {
@@ -188,32 +226,6 @@ impl PType {
             Self::I64 => Self::U64,
             _ => self,
         }
-    }
-}
-
-impl DType {
-    pub fn is_unsigned_int(&self) -> bool {
-        PType::try_from(self)
-            .map(|ptype| ptype.is_unsigned_int())
-            .unwrap_or_default()
-    }
-
-    pub fn is_signed_int(&self) -> bool {
-        PType::try_from(self)
-            .map(|ptype| ptype.is_signed_int())
-            .unwrap_or_default()
-    }
-
-    pub fn is_int(&self) -> bool {
-        PType::try_from(self)
-            .map(|ptype| ptype.is_int())
-            .unwrap_or_default()
-    }
-
-    pub fn is_float(&self) -> bool {
-        PType::try_from(self)
-            .map(|ptype| ptype.is_float())
-            .unwrap_or_default()
     }
 }
 

@@ -30,7 +30,7 @@ impl EncodingCompressor for BitPackedCompressor {
             return None;
         }
 
-        let bit_width = find_best_bit_width(&parray)?;
+        let bit_width = find_best_bit_width(&parray).ok()?;
 
         // Check that the bit width is less than the type's bit width
         if bit_width == parray.ptype().bit_width() {
@@ -52,8 +52,7 @@ impl EncodingCompressor for BitPackedCompressor {
             .compute_bit_width_freq()
             .ok_or_else(|| vortex_err!(ComputeError: "missing bit width frequency"))?;
 
-        let bit_width = find_best_bit_width(&parray)
-            .ok_or_else(|| vortex_err!(ComputeError: "missing bit width frequency"))?;
+        let bit_width = find_best_bit_width(&parray)?;
         let num_exceptions = count_exceptions(bit_width, &bit_width_freq);
 
         if bit_width == parray.ptype().bit_width() {
@@ -63,18 +62,20 @@ impl EncodingCompressor for BitPackedCompressor {
 
         let validity = ctx.compress_validity(parray.validity())?;
         let packed = bitpack(&parray, bit_width)?;
-        let patches = if num_exceptions > 0 {
-            Some(ctx.auxiliary("patches").compress(
-                &bitpack_patches(&parray, bit_width, num_exceptions),
-                like.as_ref().and_then(|l| l.child(0)),
-            )?)
-        } else {
-            None
-        };
+        let patches = (num_exceptions > 0)
+            .then(|| {
+                bitpack_patches(&parray, bit_width, num_exceptions).map(|p| {
+                    ctx.auxiliary("patches")
+                        .compress(&p, like.as_ref().and_then(|l| l.child(0)))
+                })
+            })
+            .flatten()
+            .transpose()?;
 
         Ok(CompressedArray::new(
             BitPackedArray::try_new(
                 packed,
+                parray.ptype(),
                 validity,
                 patches.as_ref().map(|p| p.array.clone()),
                 bit_width,

@@ -4,8 +4,9 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use vortex_buffer::Buffer;
 use vortex_dtype::DType;
-use vortex_error::VortexResult;
+use vortex_error::{VortexExpect as _, VortexResult};
 
+use crate::encoding::ids;
 use crate::stats::StatsSet;
 use crate::validity::{ArrayValidity, LogicalValidity, Validity, ValidityMetadata};
 use crate::variants::{ArrayVariants, BoolArrayTrait};
@@ -16,7 +17,7 @@ mod accessors;
 mod compute;
 mod stats;
 
-impl_encoding!("vortex.bool", 2u16, Bool);
+impl_encoding!("vortex.bool", ids::BOOL, Bool);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BoolMetadata {
@@ -27,7 +28,9 @@ pub struct BoolMetadata {
 
 impl BoolArray {
     pub fn buffer(&self) -> &Buffer {
-        self.array().buffer().expect("missing buffer")
+        self.as_ref()
+            .buffer()
+            .vortex_expect("Missing buffer in BoolArray")
     }
 
     pub fn boolean_buffer(&self) -> BooleanBuffer {
@@ -39,9 +42,11 @@ impl BoolArray {
     }
 
     pub fn validity(&self) -> Validity {
-        self.metadata()
-            .validity
-            .to_validity(self.array().child(0, &Validity::DTYPE, self.len()))
+        self.metadata().validity.to_validity(|| {
+            self.as_ref()
+                .child(0, &Validity::DTYPE, self.len())
+                .vortex_expect("BoolArray: validity child")
+        })
     }
 
     pub fn try_new(buffer: BooleanBuffer, validity: Validity) -> VortexResult<Self> {
@@ -72,7 +77,7 @@ impl BoolArray {
 
     pub fn from_vec(bools: Vec<bool>, validity: Validity) -> Self {
         let buffer = BooleanBuffer::from(bools);
-        Self::try_new(buffer, validity).unwrap()
+        Self::try_new(buffer, validity).vortex_expect("Failed to create BoolArray from vec")
     }
 }
 
@@ -96,7 +101,8 @@ impl BoolArrayTrait for BoolArray {
 
 impl From<BooleanBuffer> for BoolArray {
     fn from(value: BooleanBuffer) -> Self {
-        Self::try_new(value, Validity::NonNullable).unwrap()
+        Self::try_new(value, Validity::NonNullable)
+            .vortex_expect("Failed to create BoolArray from BooleanBuffer")
     }
 }
 
@@ -119,7 +125,8 @@ impl FromIterator<Option<bool>> for BoolArray {
             })
             .collect::<Vec<_>>();
 
-        Self::try_new(BooleanBuffer::from(values), Validity::from(validity)).unwrap()
+        Self::try_new(BooleanBuffer::from(values), Validity::from(validity))
+            .vortex_expect("Failed to create BoolArray from iterator of Option<bool>")
     }
 }
 
@@ -152,6 +159,7 @@ mod tests {
 
     use crate::array::BoolArray;
     use crate::compute::unary::scalar_at;
+    use crate::validity::Validity;
     use crate::variants::BoolArrayTrait;
     use crate::IntoArray;
 
@@ -160,6 +168,20 @@ mod tests {
         let arr = BoolArray::from(vec![true, false, true]).into_array();
         let scalar = bool::try_from(&scalar_at(&arr, 0).unwrap()).unwrap();
         assert!(scalar);
+    }
+
+    #[test]
+    fn test_all_some_iter() {
+        let arr = BoolArray::from_iter([Some(true), Some(false)]);
+
+        assert!(matches!(arr.validity(), Validity::AllValid));
+
+        let arr = arr.into_array();
+
+        let scalar = bool::try_from(&scalar_at(&arr, 0).unwrap()).unwrap();
+        assert!(scalar);
+        let scalar = bool::try_from(&scalar_at(&arr, 1).unwrap()).unwrap();
+        assert!(!scalar);
     }
 
     #[test]

@@ -10,6 +10,7 @@ keywords = { workspace = true }
 include = { workspace = true }
 edition = { workspace = true }
 rust-version = { workspace = true }
+readme = { workspace = true }
 
 [lints]
 workspace = true
@@ -24,6 +25,7 @@ vortex-error = { workspace = true }
 vortex-scalar = { workspace = true }
 
 [dev-dependencies]
+arrow = { workspace = true }
 divan = { workspace = true }
 
 [[bench]]

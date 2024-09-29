@@ -13,12 +13,14 @@ use crate::pvalue::PValue;
 /// cast on-read.
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum ScalarValue {
-    Null,
     Bool(bool),
     Primitive(PValue),
     Buffer(Buffer),
     BufferString(BufferString),
     List(Arc<[ScalarValue]>),
+    // It's significant that Null is last in this list. As a result generated PartialOrd sorts Scalar
+    // values such that Nulls are last (greatest)
+    Null,
 }
 
 impl ScalarValue {
@@ -61,6 +63,7 @@ impl ScalarValue {
 
     pub fn as_list(&self) -> VortexResult<Option<&Arc<[Self]>>> {
         match self {
+            Self::Null => Ok(None),
             Self::List(l) => Ok(Some(l)),
             _ => Err(vortex_err!("Expected a list scalar, found {:?}", self)),
         }

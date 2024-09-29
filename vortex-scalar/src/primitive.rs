@@ -1,7 +1,9 @@
 use num_traits::NumCast;
 use vortex_dtype::half::f16;
 use vortex_dtype::{match_each_native_ptype, DType, NativePType, Nullability, PType};
-use vortex_error::{vortex_bail, vortex_err, VortexError, VortexResult};
+use vortex_error::{
+    vortex_bail, vortex_err, vortex_panic, VortexError, VortexResult, VortexUnwrap,
+};
 
 use crate::pvalue::PValue;
 use crate::value::ScalarValue;
@@ -26,12 +28,17 @@ impl<'a> PrimitiveScalar<'a> {
     }
 
     pub fn typed_value<T: NativePType + TryFrom<PValue, Error = VortexError>>(&self) -> Option<T> {
-        if self.ptype != T::PTYPE {
-            panic!("Attempting to read {} scalar as {}", self.ptype, T::PTYPE);
-        }
+        assert_eq!(
+            self.ptype,
+            T::PTYPE,
+            "Attempting to read {} scalar as {}",
+            self.ptype,
+            T::PTYPE
+        );
+
         self.pvalue
             .as_ref()
-            .map(|pv| T::try_from(*pv).expect("checked on construction"))
+            .map(|pv| T::try_from(*pv).vortex_unwrap())
     }
 
     pub fn cast(&self, dtype: &DType) -> VortexResult<Scalar> {
@@ -85,7 +92,9 @@ impl Scalar {
     }
 
     pub fn reinterpret_cast(&self, ptype: PType) -> Self {
-        let primitive = PrimitiveScalar::try_from(self).unwrap();
+        let primitive = PrimitiveScalar::try_from(self).unwrap_or_else(|e| {
+            vortex_panic!(e, "Failed to reinterpret cast {} to {}", self.dtype, ptype)
+        });
         if primitive.ptype() == ptype {
             return self.clone();
         }

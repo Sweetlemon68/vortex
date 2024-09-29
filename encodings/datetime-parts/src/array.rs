@@ -1,17 +1,21 @@
 use std::fmt::Debug;
 
 use serde::{Deserialize, Serialize};
+use vortex::array::StructArray;
+use vortex::encoding::ids;
 use vortex::stats::{ArrayStatisticsCompute, StatsSet};
 use vortex::validity::{ArrayValidity, LogicalValidity};
 use vortex::variants::{ArrayVariants, ExtensionArrayTrait};
 use vortex::visitor::{AcceptArrayVisitor, ArrayVisitor};
-use vortex::{impl_encoding, Array, ArrayDType, ArrayDef, ArrayTrait, Canonical, IntoCanonical};
+use vortex::{
+    impl_encoding, Array, ArrayDType, ArrayDef, ArrayTrait, Canonical, IntoArray, IntoCanonical,
+};
 use vortex_dtype::DType;
-use vortex_error::{vortex_bail, VortexResult};
+use vortex_error::{vortex_bail, VortexExpect as _, VortexResult};
 
 use crate::compute::decode_to_temporal;
 
-impl_encoding!("vortex.datetimeparts", 22u16, DateTimeParts);
+impl_encoding!("vortex.datetimeparts", ids::DATE_TIME_PARTS, DateTimeParts);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DateTimePartsMetadata {
@@ -63,21 +67,21 @@ impl DateTimePartsArray {
     }
 
     pub fn days(&self) -> Array {
-        self.array()
+        self.as_ref()
             .child(0, &self.metadata().days_dtype, self.len())
-            .expect("Missing days array")
+            .vortex_expect("DatetimePartsArray missing days array")
     }
 
     pub fn seconds(&self) -> Array {
-        self.array()
+        self.as_ref()
             .child(1, &self.metadata().seconds_dtype, self.len())
-            .expect("Missing seconds array")
+            .vortex_expect("DatetimePartsArray missing seconds array")
     }
 
     pub fn subsecond(&self) -> Array {
-        self.array()
+        self.as_ref()
             .child(2, &self.metadata().subseconds_dtype, self.len())
-            .expect("Missing subsecond array")
+            .vortex_expect("DatetimePartsArray missing subsecond array")
     }
 }
 
@@ -89,7 +93,19 @@ impl ArrayVariants for DateTimePartsArray {
     }
 }
 
-impl ExtensionArrayTrait for DateTimePartsArray {}
+impl ExtensionArrayTrait for DateTimePartsArray {
+    fn storage_array(&self) -> Array {
+        // FIXME(ngates): this needs to be a tuple array so we can implement Compare
+        StructArray::try_new(
+            vec!["days".into(), "seconds".into(), "subseconds".into()].into(),
+            [self.days(), self.seconds(), self.subsecond()].into(),
+            self.len(),
+            self.logical_validity().into_validity(),
+        )
+        .vortex_expect("Failed to create struct array")
+        .into_array()
+    }
+}
 
 impl IntoCanonical for DateTimePartsArray {
     fn into_canonical(self) -> VortexResult<Canonical> {

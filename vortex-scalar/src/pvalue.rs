@@ -1,11 +1,14 @@
+use core::fmt::Display;
+use std::cmp::Ordering;
 use std::mem;
 
 use num_traits::NumCast;
+use paste::paste;
 use vortex_dtype::half::f16;
-use vortex_dtype::PType;
+use vortex_dtype::{NativePType, PType};
 use vortex_error::{vortex_err, VortexError};
 
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PValue {
     U8(u8),
     U16(u16),
@@ -18,6 +21,40 @@ pub enum PValue {
     F16(f16),
     F32(f32),
     F64(f64),
+}
+
+impl PartialOrd for PValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        match (self, other) {
+            (Self::U8(s), Self::U8(o)) => Some(s.compare(*o)),
+            (Self::U16(s), Self::U16(o)) => Some(s.compare(*o)),
+            (Self::U32(s), Self::U32(o)) => Some(s.compare(*o)),
+            (Self::U64(s), Self::U64(o)) => Some(s.compare(*o)),
+            (Self::I8(s), Self::I8(o)) => Some(s.compare(*o)),
+            (Self::I16(s), Self::I16(o)) => Some(s.compare(*o)),
+            (Self::I32(s), Self::I32(o)) => Some(s.compare(*o)),
+            (Self::I64(s), Self::I64(o)) => Some(s.compare(*o)),
+            (Self::F16(s), Self::F16(o)) => Some(s.compare(*o)),
+            (Self::F32(s), Self::F32(o)) => Some(s.compare(*o)),
+            (Self::F64(s), Self::F64(o)) => Some(s.compare(*o)),
+            (..) => None,
+        }
+    }
+}
+
+macro_rules! as_primitive {
+    ($T:ty, $PT:tt) => {
+        paste! {
+            #[doc = "Access PValue as `" $T "`, returning `None` if conversion is unsuccessful"]
+            pub fn [<as_ $T>](self) -> Option<$T> {
+                if let PValue::$PT(v) = self {
+                    Some(v)
+                } else {
+                    None
+                }
+            }
+        }
+    };
 }
 
 impl PValue {
@@ -99,6 +136,18 @@ impl PValue {
             },
         }
     }
+
+    as_primitive!(i8, I8);
+    as_primitive!(i16, I16);
+    as_primitive!(i32, I32);
+    as_primitive!(i64, I64);
+    as_primitive!(u8, U8);
+    as_primitive!(u16, U16);
+    as_primitive!(u32, U32);
+    as_primitive!(u64, U64);
+    as_primitive!(f16, F16);
+    as_primitive!(f32, F32);
+    as_primitive!(f64, F64);
 }
 
 macro_rules! int_pvalue {
@@ -165,6 +214,7 @@ impl TryFrom<PValue> for f16 {
         // We serialize f16 as u16.
         match value {
             PValue::U16(u) => Some(Self::from_bits(u)),
+            PValue::F16(u) => Some(u),
             PValue::F32(f) => <Self as NumCast>::from(f),
             PValue::F64(f) => <Self as NumCast>::from(f),
             _ => None,
@@ -181,6 +231,24 @@ macro_rules! impl_pvalue {
             }
         }
     };
+}
+
+impl Display for PValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::U8(v) => write!(f, "{}_u8", v),
+            Self::U16(v) => write!(f, "{}_u16", v),
+            Self::U32(v) => write!(f, "{}_u32", v),
+            Self::U64(v) => write!(f, "{}_u64", v),
+            Self::I8(v) => write!(f, "{}_i8", v),
+            Self::I16(v) => write!(f, "{}_i16", v),
+            Self::I32(v) => write!(f, "{}_i32", v),
+            Self::I64(v) => write!(f, "{}_i64", v),
+            Self::F16(v) => write!(f, "{}_f16", v),
+            Self::F32(v) => write!(f, "{}_f32", v),
+            Self::F64(v) => write!(f, "{}_f64", v),
+        }
+    }
 }
 
 impl_pvalue!(u8, U8);

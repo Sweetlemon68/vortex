@@ -3,18 +3,22 @@ use std::sync::Arc;
 
 use arrow_schema::SchemaRef;
 use async_trait::async_trait;
+use datafusion::catalog::Session;
 use datafusion::datasource::physical_plan::FileScanConfig;
 use datafusion::datasource::TableProvider;
-use datafusion::execution::context::SessionState;
-use datafusion_common::{project_schema, Result as DFResult, Statistics, ToDFSchema};
+use datafusion_common::{
+    project_schema, DataFusionError, Result as DFResult, Statistics, ToDFSchema,
+};
 use datafusion_execution::object_store::ObjectStoreUrl;
 use datafusion_expr::utils::conjunction;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datafusion_physical_plan::empty::EmptyExec;
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::ExecutionPlan;
+use itertools::Itertools;
 
 use super::config::VortexTableOptions;
+use crate::can_be_pushed_down;
 use crate::persistent::execution::VortexExec;
 
 pub struct VortexFileTableProvider {
@@ -26,7 +30,10 @@ pub struct VortexFileTableProvider {
 impl VortexFileTableProvider {
     pub fn try_new(object_store_url: ObjectStoreUrl, config: VortexTableOptions) -> DFResult<Self> {
         Ok(Self {
-            schema_ref: config.schema.clone().unwrap(),
+            schema_ref: config
+                .schema
+                .clone()
+                .ok_or_else(|| DataFusionError::Configuration("Missing schema".to_string()))?,
             object_store_url,
             config,
         })
@@ -49,7 +56,7 @@ impl TableProvider for VortexFileTableProvider {
 
     async fn scan(
         &self,
-        state: &SessionState,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         _limit: Option<usize>,
@@ -74,7 +81,7 @@ impl TableProvider for VortexFileTableProvider {
                     .data_files
                     .iter()
                     .cloned()
-                    .map(|f| f.into())
+                    .map(Into::into)
                     .collect(),
             )
             .with_projection(projection.cloned());
@@ -95,7 +102,16 @@ impl TableProvider for VortexFileTableProvider {
         &self,
         filters: &[&Expr],
     ) -> DFResult<Vec<TableProviderFilterPushDown>> {
-        Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
+        filters
+            .iter()
+            .map(|expr| {
+                if can_be_pushed_down(expr, self.schema().as_ref()) {
+                    Ok(TableProviderFilterPushDown::Exact)
+                } else {
+                    Ok(TableProviderFilterPushDown::Unsupported)
+                }
+            })
+            .try_collect()
     }
 
     fn statistics(&self) -> Option<Statistics> {

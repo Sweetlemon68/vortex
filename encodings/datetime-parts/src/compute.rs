@@ -1,11 +1,11 @@
-use vortex::array::temporal::TemporalMetadata;
-use vortex::array::{PrimitiveArray, TemporalArray, TimeUnit};
+use vortex::array::{PrimitiveArray, TemporalArray};
 use vortex::compute::unary::{scalar_at, ScalarAtFn};
 use vortex::compute::{slice, take, ArrayCompute, SliceFn, TakeFn};
 use vortex::validity::ArrayValidity;
 use vortex::{Array, ArrayDType, IntoArray, IntoArrayVariant};
+use vortex_datetime_dtype::{TemporalMetadata, TimeUnit};
 use vortex_dtype::DType;
-use vortex_error::{vortex_bail, VortexResult};
+use vortex_error::{vortex_bail, VortexResult, VortexUnwrap as _};
 use vortex_scalar::Scalar;
 
 use crate::DateTimePartsArray;
@@ -28,9 +28,9 @@ impl TakeFn for DateTimePartsArray {
     fn take(&self, indices: &Array) -> VortexResult<Array> {
         Ok(Self::try_new(
             self.dtype().clone(),
-            take(&self.days(), indices)?,
-            take(&self.seconds(), indices)?,
-            take(&self.subsecond(), indices)?,
+            take(self.days(), indices)?,
+            take(self.seconds(), indices)?,
+            take(self.subsecond(), indices)?,
         )?
         .into_array())
     }
@@ -40,9 +40,9 @@ impl SliceFn for DateTimePartsArray {
     fn slice(&self, start: usize, stop: usize) -> VortexResult<Array> {
         Ok(Self::try_new(
             self.dtype().clone(),
-            slice(&self.days(), start, stop)?,
-            slice(&self.seconds(), start, stop)?,
-            slice(&self.subsecond(), start, stop)?,
+            slice(self.days(), start, stop)?,
+            slice(self.seconds(), start, stop)?,
+            slice(self.subsecond(), start, stop)?,
         )?
         .into_array())
     }
@@ -51,13 +51,14 @@ impl SliceFn for DateTimePartsArray {
 impl ScalarAtFn for DateTimePartsArray {
     fn scalar_at(&self, index: usize) -> VortexResult<Scalar> {
         let DType::Extension(ext, nullability) = self.dtype().clone() else {
-            panic!("DateTimePartsArray must have extension dtype");
+            vortex_bail!(
+                "DateTimePartsArray must have extension dtype, found {}",
+                self.dtype()
+            );
         };
 
-        let TemporalMetadata::Timestamp(time_unit, _) = TemporalMetadata::try_from(&ext)
-            .expect("extension metadata must decode to TemporalMetadata")
-        else {
-            panic!("metadata must be Timestamp");
+        let TemporalMetadata::Timestamp(time_unit, _) = TemporalMetadata::try_from(&ext)? else {
+            vortex_bail!("Metadata must be Timestamp, found {}", ext.id());
         };
 
         let divisor = match time_unit {
@@ -65,7 +66,7 @@ impl ScalarAtFn for DateTimePartsArray {
             TimeUnit::Us => 1_000_000,
             TimeUnit::Ms => 1_000,
             TimeUnit::S => 1,
-            TimeUnit::D => panic!("invalid time unit D"),
+            TimeUnit::D => vortex_bail!("Invalid time unit D"),
         };
 
         let days: i64 = scalar_at(&self.days(), index)?.try_into()?;
@@ -75,6 +76,10 @@ impl ScalarAtFn for DateTimePartsArray {
         let scalar = days * 86_400 * divisor + seconds * divisor + subseconds;
 
         Ok(Scalar::primitive(scalar, nullability))
+    }
+
+    fn scalar_at_unchecked(&self, index: usize) -> Scalar {
+        <Self as ScalarAtFn>::scalar_at(self, index).vortex_unwrap()
     }
 }
 
@@ -113,14 +118,15 @@ pub fn decode_to_temporal(array: &DateTimePartsArray) -> VortexResult<TemporalAr
     Ok(TemporalArray::new_timestamp(
         PrimitiveArray::from_vec(values, array.logical_validity().into_validity()).into_array(),
         temporal_metadata.time_unit(),
-        temporal_metadata.time_zone().map(|s| s.to_string()),
+        temporal_metadata.time_zone().map(ToString::to_string),
     ))
 }
 
 #[cfg(test)]
 mod test {
-    use vortex::array::{PrimitiveArray, TemporalArray, TimeUnit};
+    use vortex::array::{PrimitiveArray, TemporalArray};
     use vortex::{IntoArray, IntoArrayVariant};
+    use vortex_datetime_dtype::TimeUnit;
     use vortex_dtype::{DType, Nullability};
 
     use crate::compute::decode_to_temporal;

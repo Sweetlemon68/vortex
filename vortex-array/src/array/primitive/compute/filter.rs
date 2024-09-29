@@ -3,7 +3,6 @@ use vortex_error::{vortex_err, VortexResult};
 
 use crate::array::primitive::PrimitiveArray;
 use crate::compute::FilterFn;
-use crate::validity::filter_validity;
 use crate::variants::BoolArrayTrait;
 use crate::{Array, IntoArray};
 
@@ -18,7 +17,7 @@ fn filter_select_primitive(
     predicate: &Array,
 ) -> VortexResult<PrimitiveArray> {
     predicate.with_dyn(|b| {
-        let validity = filter_validity(arr.validity(), predicate)?;
+        let validity = arr.validity().filter(predicate)?;
         let predicate = b.as_bool_array().ok_or_else(||vortex_err!(
                 NotImplemented: "as_bool_array",
                 predicate.encoding().id()
@@ -61,7 +60,7 @@ mod test {
         let arr = PrimitiveArray::from(vec![1u32, 24, 54, 2, 3, 2, 3, 2]);
 
         let filtered =
-            filter_select_primitive(&arr, BoolArray::from(filter.clone()).array()).unwrap();
+            filter_select_primitive(&arr, BoolArray::from(filter.clone()).as_ref()).unwrap();
         assert_eq!(
             filtered.len(),
             filter.iter().filter(|x| **x).collect_vec().len()

@@ -1,7 +1,7 @@
-use vortex::compute::unary::{scalar_at, ScalarAtFn};
+use vortex::compute::unary::{scalar_at, scalar_at_unchecked, ScalarAtFn};
 use vortex::compute::{slice, take, ArrayCompute, SliceFn, TakeFn};
 use vortex::{Array, IntoArray};
-use vortex_error::VortexResult;
+use vortex_error::{VortexExpect, VortexResult};
 use vortex_scalar::Scalar;
 
 use crate::DictArray;
@@ -23,7 +23,16 @@ impl ArrayCompute for DictArray {
 impl ScalarAtFn for DictArray {
     fn scalar_at(&self, index: usize) -> VortexResult<Scalar> {
         let dict_index: usize = scalar_at(&self.codes(), index)?.as_ref().try_into()?;
-        scalar_at(&self.values(), dict_index)
+        Ok(scalar_at_unchecked(&self.values(), dict_index))
+    }
+
+    fn scalar_at_unchecked(&self, index: usize) -> Scalar {
+        let dict_index: usize = scalar_at_unchecked(&self.codes(), index)
+            .as_ref()
+            .try_into()
+            .vortex_expect("Invalid dict index");
+
+        scalar_at_unchecked(&self.values(), dict_index)
     }
 }
 
@@ -32,7 +41,7 @@ impl TakeFn for DictArray {
         // Dict
         //   codes: 0 0 1
         //   dict: a b c d e f g h
-        let codes = take(&self.codes(), indices)?;
+        let codes = take(self.codes(), indices)?;
         Self::try_new(codes, self.values()).map(|a| a.into_array())
     }
 }
@@ -40,7 +49,7 @@ impl TakeFn for DictArray {
 impl SliceFn for DictArray {
     // TODO(robert): Add function to trim the dictionary
     fn slice(&self, start: usize, stop: usize) -> VortexResult<Array> {
-        Self::try_new(slice(&self.codes(), start, stop)?, self.values()).map(|a| a.into_array())
+        Self::try_new(slice(self.codes(), start, stop)?, self.values()).map(|a| a.into_array())
     }
 }
 

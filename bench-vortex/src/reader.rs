@@ -20,21 +20,23 @@ use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::{ArrowReaderOptions, ParquetRecordBatchReaderBuilder};
 use parquet::arrow::async_reader::{AsyncFileReader, ParquetObjectReader};
 use parquet::arrow::ParquetRecordBatchStreamBuilder;
+use parquet::file::metadata::RowGroupMetaData;
 use serde::{Deserialize, Serialize};
 use stream::StreamExt;
 use vortex::array::{ChunkedArray, PrimitiveArray};
 use vortex::arrow::FromArrowType;
 use vortex::compress::CompressionStrategy;
 use vortex::stream::ArrayStreamExt;
-use vortex::{Array, IntoArray, IntoCanonical};
+use vortex::{Array, ArrayDType, IntoArray, IntoCanonical};
 use vortex_buffer::Buffer;
 use vortex_dtype::DType;
 use vortex_error::{vortex_err, VortexResult};
 use vortex_sampling_compressor::SamplingCompressor;
 use vortex_serde::chunked_reader::ChunkedArrayReader;
-use vortex_serde::io::{ObjectStoreExt, TokioAdapter, VortexReadAt, VortexWrite};
-use vortex_serde::writer::ArrayWriter;
-use vortex_serde::MessageReader;
+use vortex_serde::io::{ObjectStoreExt, VortexReadAt, VortexWrite};
+use vortex_serde::stream_reader::StreamArrayReader;
+use vortex_serde::stream_writer::StreamArrayWriter;
+use vortex_serde::DTypeReader;
 
 use crate::{COMPRESSORS, CTX};
 
@@ -49,13 +51,15 @@ pub struct VortexFooter {
 
 pub async fn open_vortex(path: &Path) -> VortexResult<Array> {
     let file = tokio::fs::File::open(path).await.unwrap();
-    let mut msgs = MessageReader::try_new(TokioAdapter(file)).await.unwrap();
-    msgs.array_stream_from_messages(CTX.clone())
-        .await
-        .unwrap()
+    let reader = StreamArrayReader::try_new(file, CTX.clone())
+        .await?
+        .load_dtype()
+        .await?;
+    reader
+        .into_array_stream()
         .collect_chunked()
         .await
-        .map(|a| a.into_array())
+        .map(IntoArray::into_array)
 }
 
 pub async fn rewrite_parquet_as_vortex<W: VortexWrite>(
@@ -64,7 +68,7 @@ pub async fn rewrite_parquet_as_vortex<W: VortexWrite>(
 ) -> VortexResult<()> {
     let chunked = compress_parquet_to_vortex(parquet_path.as_path())?;
 
-    let written = ArrayWriter::new(write)
+    let written = StreamArrayWriter::new(write)
         .write_array_stream(chunked.array_stream())
         .await?;
 
@@ -85,24 +89,30 @@ pub async fn rewrite_parquet_as_vortex<W: VortexWrite>(
     Ok(())
 }
 
-pub fn compress_parquet_to_vortex(parquet_path: &Path) -> VortexResult<ChunkedArray> {
+pub fn read_parquet_to_vortex(parquet_path: &Path) -> VortexResult<ChunkedArray> {
     let taxi_pq = File::open(parquet_path)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(taxi_pq)?;
-
     // FIXME(ngates): #157 the compressor should handle batch size.
     let reader = builder.with_batch_size(BATCH_SIZE).build()?;
-
     let dtype = DType::from_arrow(reader.schema());
-
-    let compressor: &dyn CompressionStrategy = &SamplingCompressor::new(COMPRESSORS.clone());
     let chunks = reader
         .map(|batch_result| batch_result.unwrap())
-        .map(|record_batch| {
-            let vortex_array = Array::from(record_batch);
-            compressor.compress(&vortex_array).unwrap()
-        })
-        .collect_vec();
+        .map(Array::try_from)
+        .collect::<VortexResult<Vec<_>>>()?;
     ChunkedArray::try_new(chunks, dtype)
+}
+
+pub fn compress_parquet_to_vortex(parquet_path: &Path) -> VortexResult<ChunkedArray> {
+    let chunked = read_parquet_to_vortex(parquet_path)?;
+    let compressor: &dyn CompressionStrategy = &SamplingCompressor::new(COMPRESSORS.clone());
+    let dtype = chunked.dtype().clone();
+    ChunkedArray::try_new(
+        chunked
+            .chunks()
+            .map(|x| compressor.compress(&x))
+            .collect::<VortexResult<Vec<_>>>()?,
+        dtype,
+    )
 }
 
 pub fn write_csv_as_parquet(csv_path: PathBuf, output_path: &Path) -> VortexResult<()> {
@@ -117,7 +127,8 @@ pub fn write_csv_as_parquet(csv_path: PathBuf, output_path: &Path) -> VortexResu
             csv_path.as_path().to_str().unwrap(),
             output_path.to_str().unwrap()
         ))
-        .status()?
+        .status()
+        .unwrap()
         .exit_ok()
         .unwrap();
     Ok(())
@@ -146,8 +157,7 @@ pub async fn read_vortex_footer_format<R: VortexReadAt>(
     buf.reserve(header_len - buf.len());
     unsafe { buf.set_len(header_len) }
     buf = reader.read_at_into(footer.dtype_range.start, buf).await?;
-    let mut header_reader = MessageReader::try_new(buf).await?;
-    let dtype = header_reader.read_dtype().await?;
+    let dtype = DTypeReader::new(buf).await?.read_dtype().await?;
 
     ChunkedArrayReader::try_new(
         reader,
@@ -176,7 +186,7 @@ pub async fn take_vortex_object_store(
 pub async fn take_vortex_tokio(path: &Path, indices: &[u64]) -> VortexResult<Array> {
     let len = File::open(path)?.metadata()?.len();
     let indices_array = indices.to_vec().into_array();
-    let taken = read_vortex_footer_format(TokioAdapter(tokio::fs::File::open(path).await?), len)
+    let taken = read_vortex_footer_format(tokio::fs::File::open(path).await?, len)
         .await?
         .take_rows(&indices_array)
         .await?;
@@ -217,7 +227,7 @@ async fn parquet_take_from_stream<T: AsyncFileReader + Unpin + Send + 'static>(
             .metadata()
             .row_groups()
             .iter()
-            .map(|rg| rg.num_rows())
+            .map(RowGroupMetaData::num_rows)
             .scan(0i64, |acc, x| {
                 *acc += x;
                 Some(*acc)
@@ -236,7 +246,7 @@ async fn parquet_take_from_stream<T: AsyncFileReader + Unpin + Send + 'static>(
     let row_group_indices = row_groups
         .keys()
         .sorted()
-        .map(|i| row_groups.get(i).unwrap().clone())
+        .map(|i| row_groups[i].clone())
         .collect_vec();
 
     let reader = builder

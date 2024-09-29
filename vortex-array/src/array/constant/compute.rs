@@ -1,28 +1,24 @@
 use std::cmp::Ordering;
-use std::sync::Arc;
 
-use arrow_array::Datum;
 use vortex_dtype::Nullability;
-use vortex_error::{vortex_bail, vortex_err, VortexResult};
-use vortex_expr::Operator;
+use vortex_error::{vortex_bail, vortex_err, VortexExpect, VortexResult};
 use vortex_scalar::Scalar;
 
 use crate::array::constant::ConstantArray;
-use crate::arrow::FromArrowArray;
 use crate::compute::unary::{scalar_at, ScalarAtFn};
 use crate::compute::{
-    scalar_cmp, AndFn, ArrayCompute, CompareFn, FilterFn, OrFn, SearchResult, SearchSortedFn,
-    SearchSortedSide, SliceFn, TakeFn,
+    scalar_cmp, AndFn, ArrayCompute, FilterFn, MaybeCompareFn, Operator, OrFn, SearchResult,
+    SearchSortedFn, SearchSortedSide, SliceFn, TakeFn,
 };
 use crate::stats::{ArrayStatistics, Stat};
-use crate::{Array, ArrayDType, AsArray, IntoArray, IntoCanonical};
+use crate::{Array, ArrayDType, IntoArray};
 
 impl ArrayCompute for ConstantArray {
-    fn scalar_at(&self) -> Option<&dyn ScalarAtFn> {
-        Some(self)
+    fn compare(&self, other: &Array, operator: Operator) -> Option<VortexResult<Array>> {
+        MaybeCompareFn::maybe_compare(self, other, operator)
     }
 
-    fn slice(&self) -> Option<&dyn SliceFn> {
+    fn scalar_at(&self) -> Option<&dyn ScalarAtFn> {
         Some(self)
     }
 
@@ -30,11 +26,11 @@ impl ArrayCompute for ConstantArray {
         Some(self)
     }
 
-    fn take(&self) -> Option<&dyn TakeFn> {
+    fn slice(&self) -> Option<&dyn SliceFn> {
         Some(self)
     }
 
-    fn compare(&self) -> Option<&dyn CompareFn> {
+    fn take(&self) -> Option<&dyn TakeFn> {
         Some(self)
     }
 
@@ -48,8 +44,12 @@ impl ArrayCompute for ConstantArray {
 }
 
 impl ScalarAtFn for ConstantArray {
-    fn scalar_at(&self, _index: usize) -> VortexResult<Scalar> {
-        Ok(self.scalar().clone())
+    fn scalar_at(&self, index: usize) -> VortexResult<Scalar> {
+        Ok(<Self as ScalarAtFn>::scalar_at_unchecked(self, index))
+    }
+
+    fn scalar_at_unchecked(&self, _index: usize) -> Scalar {
+        self.scalar().clone()
     }
 }
 
@@ -95,31 +95,19 @@ impl SearchSortedFn for ConstantArray {
     }
 }
 
-impl CompareFn for ConstantArray {
-    fn compare(&self, rhs: &Array, operator: Operator) -> VortexResult<Array> {
-        if let Some(true) = rhs.statistics().get_as::<bool>(Stat::IsConstant) {
+impl MaybeCompareFn for ConstantArray {
+    fn maybe_compare(&self, other: &Array, operator: Operator) -> Option<VortexResult<Array>> {
+        (ConstantArray::try_from(other).is_ok()
+            || other
+                .statistics()
+                .get_as::<bool>(Stat::IsConstant)
+                .unwrap_or_default())
+        .then(|| {
             let lhs = self.scalar();
-            let rhs = scalar_at(rhs, 0)?;
-
+            let rhs = scalar_at(other, 0).vortex_expect("Expected scalar");
             let scalar = scalar_cmp(lhs, &rhs, operator);
-
             Ok(ConstantArray::new(scalar, self.len()).into_array())
-        } else {
-            let datum = Arc::<dyn Datum>::from(self.scalar());
-            let rhs = rhs.clone().into_canonical()?.into_arrow();
-            let rhs = rhs.as_ref();
-
-            let boolean_array = match operator {
-                Operator::Eq => arrow_ord::cmp::eq(datum.as_ref(), &rhs)?,
-                Operator::NotEq => arrow_ord::cmp::neq(datum.as_ref(), &rhs)?,
-                Operator::Gt => arrow_ord::cmp::gt(datum.as_ref(), &rhs)?,
-                Operator::Gte => arrow_ord::cmp::gt_eq(datum.as_ref(), &rhs)?,
-                Operator::Lt => arrow_ord::cmp::lt(datum.as_ref(), &rhs)?,
-                Operator::Lte => arrow_ord::cmp::lt_eq(datum.as_ref(), &rhs)?,
-            };
-
-            Ok(Array::from_arrow(&boolean_array, true))
-        }
+        })
     }
 }
 
@@ -152,7 +140,7 @@ fn constant_array_bool_impl(
     fallback_fn: impl Fn(&Array, &Array) -> Option<VortexResult<Array>>,
 ) -> VortexResult<Array> {
     // If the right side is constant
-    if let Some(true) = other.statistics().get_as::<bool>(Stat::IsConstant) {
+    if other.statistics().get_as::<bool>(Stat::IsConstant) == Some(true) {
         let lhs = constant_array.scalar().value().as_bool()?;
         let rhs = scalar_at(other, 0)?.value().as_bool()?;
 
@@ -164,7 +152,7 @@ fn constant_array_bool_impl(
         Ok(ConstantArray::new(scalar, constant_array.len()).into_array())
     } else {
         // try and use a the rhs specialized implementation if it exists
-        match fallback_fn(other, constant_array.as_array_ref()) {
+        match fallback_fn(other, constant_array.as_ref()) {
             Some(r) => r,
             None => vortex_bail!("Operation is not supported"),
         }

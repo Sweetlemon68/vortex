@@ -6,7 +6,7 @@ use itertools::Itertools;
 pub use statsset::*;
 use vortex_dtype::Nullability::NonNullable;
 use vortex_dtype::{DType, NativePType};
-use vortex_error::{VortexError, VortexResult};
+use vortex_error::{vortex_panic, VortexError, VortexResult};
 use vortex_scalar::Scalar;
 
 use crate::Array;
@@ -58,24 +58,6 @@ pub trait Statistics {
     fn compute(&self, stat: Stat) -> Option<Scalar>;
 }
 
-pub struct EmptyStatistics;
-
-impl Statistics for EmptyStatistics {
-    fn get(&self, _stat: Stat) -> Option<Scalar> {
-        None
-    }
-
-    fn to_set(&self) -> StatsSet {
-        StatsSet::new()
-    }
-
-    fn set(&self, _stat: Stat, _value: Scalar) {}
-
-    fn compute(&self, _stat: Stat) -> Option<Scalar> {
-        None
-    }
-}
-
 pub trait ArrayStatistics {
     fn statistics(&self) -> &dyn Statistics;
 }
@@ -93,7 +75,16 @@ impl dyn Statistics + '_ {
         stat: Stat,
     ) -> Option<U> {
         self.get(stat)
-            .map(|s| U::try_from(&s).expect("Invalid stats cast"))
+            .map(|s| U::try_from(&s))
+            .transpose()
+            .unwrap_or_else(|err| {
+                vortex_panic!(
+                    err,
+                    "Failed to cast stat {} to {}",
+                    stat,
+                    std::any::type_name::<U>()
+                )
+            })
     }
 
     pub fn get_as_cast<U: NativePType + for<'a> TryFrom<&'a Scalar, Error = VortexError>>(
@@ -101,11 +92,13 @@ impl dyn Statistics + '_ {
         stat: Stat,
     ) -> Option<U> {
         self.get(stat)
-            .map(|s| {
-                s.cast(&DType::Primitive(U::PTYPE, NonNullable))
-                    .expect("Invalid scalar cast")
+            .filter(|s| s.is_valid())
+            .map(|s| s.cast(&DType::Primitive(U::PTYPE, NonNullable)))
+            .transpose()
+            .and_then(|maybe| maybe.as_ref().map(U::try_from).transpose())
+            .unwrap_or_else(|err| {
+                vortex_panic!(err, "Failed to cast stat {} to {}", stat, U::PTYPE)
             })
-            .map(|s| U::try_from(&s).expect("Invalid stats cast"))
     }
 
     pub fn compute_as<U: for<'a> TryFrom<&'a Scalar, Error = VortexError>>(
@@ -113,7 +106,16 @@ impl dyn Statistics + '_ {
         stat: Stat,
     ) -> Option<U> {
         self.compute(stat)
-            .map(|s| U::try_from(&s).expect("Invalid stats cast"))
+            .map(|s| U::try_from(&s))
+            .transpose()
+            .unwrap_or_else(|err| {
+                vortex_panic!(
+                    err,
+                    "Failed to compute stat {} as {}",
+                    stat,
+                    std::any::type_name::<U>()
+                )
+            })
     }
 
     pub fn compute_as_cast<U: NativePType + for<'a> TryFrom<&'a Scalar, Error = VortexError>>(
@@ -121,11 +123,13 @@ impl dyn Statistics + '_ {
         stat: Stat,
     ) -> Option<U> {
         self.compute(stat)
-            .map(|s| {
-                s.cast(&DType::Primitive(U::PTYPE, NonNullable))
-                    .expect("Invalid scalar cast")
+            .filter(|s| s.is_valid())
+            .map(|s| s.cast(&DType::Primitive(U::PTYPE, NonNullable)))
+            .transpose()
+            .and_then(|maybe| maybe.as_ref().map(U::try_from).transpose())
+            .unwrap_or_else(|err| {
+                vortex_panic!(err, "Failed to compute stat {} as cast {}", stat, U::PTYPE)
             })
-            .map(|s| U::try_from(&s).expect("Invalid stats cast"))
     }
 
     pub fn compute_min<U: for<'a> TryFrom<&'a Scalar, Error = VortexError>>(&self) -> Option<U> {
@@ -180,4 +184,19 @@ pub fn trailing_zeros(array: &Array) -> u8 {
         .find_or_first(|(_, &v)| v > 0)
         .map(|(i, _)| i)
         .unwrap_or(0) as u8
+}
+
+#[cfg(test)]
+mod test {
+    use crate::array::PrimitiveArray;
+    use crate::stats::{ArrayStatistics, Stat};
+
+    #[test]
+    fn min_of_nulls_is_not_panic() {
+        let min = PrimitiveArray::from_nullable_vec::<i32>(vec![None, None, None, None])
+            .statistics()
+            .compute_as_cast::<i64>(Stat::Min);
+
+        assert_eq!(min, None);
+    }
 }

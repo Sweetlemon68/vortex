@@ -8,18 +8,19 @@
 //! from Arrow.
 
 pub use boolean::{and, or, AndFn, OrFn};
-pub use compare::{compare, scalar_cmp, CompareFn};
+pub use compare::{compare, scalar_cmp, CompareFn, MaybeCompareFn, Operator};
 pub use filter::{filter, FilterFn};
-pub use filter_indices::{filter_indices, FilterIndicesFn};
 pub use search_sorted::*;
 pub use slice::{slice, SliceFn};
 pub use take::{take, TakeFn};
 use unary::{CastFn, FillForwardFn, ScalarAtFn, SubtractScalarFn};
+use vortex_error::VortexResult;
+
+use crate::Array;
 
 mod boolean;
 mod compare;
 mod filter;
-mod filter_indices;
 mod search_sorted;
 mod slice;
 mod take;
@@ -38,7 +39,7 @@ pub trait ArrayCompute {
     /// Binary operator implementation for arrays against other arrays.
     ///
     ///See: [CompareFn].
-    fn compare(&self) -> Option<&dyn CompareFn> {
+    fn compare(&self, _other: &Array, _operator: Operator) -> Option<VortexResult<Array>> {
         None
     }
 
@@ -53,12 +54,6 @@ pub trait ArrayCompute {
     ///
     /// See: [FilterFn].
     fn filter(&self) -> Option<&dyn FilterFn> {
-        None
-    }
-
-    /// Filter indices based on a disjunctive normal form relational expression.
-    /// TODO(aduffy): remove this function and push implementation into vortex-datafusion.
-    fn filter_indices(&self) -> Option<&dyn FilterIndicesFn> {
         None
     }
 

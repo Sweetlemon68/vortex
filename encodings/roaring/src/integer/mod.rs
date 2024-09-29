@@ -3,7 +3,8 @@ use std::fmt::Debug;
 pub use compress::*;
 use croaring::{Bitmap, Portable};
 use serde::{Deserialize, Serialize};
-use vortex::array::{Primitive, PrimitiveArray};
+use vortex::array::PrimitiveArray;
+use vortex::encoding::ids;
 use vortex::stats::{ArrayStatisticsCompute, StatsSet};
 use vortex::validity::{ArrayValidity, LogicalValidity};
 use vortex::variants::{ArrayVariants, PrimitiveArrayTrait};
@@ -14,12 +15,12 @@ use vortex::{
 use vortex_buffer::Buffer;
 use vortex_dtype::Nullability::NonNullable;
 use vortex_dtype::{DType, PType};
-use vortex_error::{vortex_bail, vortex_err, VortexResult};
+use vortex_error::{vortex_bail, VortexExpect as _, VortexResult};
 
 mod compress;
 mod compute;
 
-impl_encoding!("vortex.roaring_int", 18u16, RoaringInt);
+impl_encoding!("vortex.roaring_int", ids::ROARING_INT, RoaringInt);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoaringIntMetadata {
@@ -47,9 +48,9 @@ impl RoaringIntArray {
     pub fn bitmap(&self) -> Bitmap {
         //TODO(@jdcasale): figure out a way to avoid this deserialization per-call
         Bitmap::deserialize::<Portable>(
-            self.array()
+            self.as_ref()
                 .buffer()
-                .expect("RoaringBoolArray buffer is missing")
+                .vortex_expect("RoaringBoolArray buffer is missing")
                 .as_ref(),
         )
     }
@@ -59,10 +60,10 @@ impl RoaringIntArray {
     }
 
     pub fn encode(array: Array) -> VortexResult<Array> {
-        if array.encoding().id() == Primitive::ID {
-            Ok(roaring_int_encode(PrimitiveArray::try_from(array)?)?.into_array())
+        if let Ok(parray) = PrimitiveArray::try_from(array) {
+            Ok(roaring_int_encode(parray)?.into_array())
         } else {
-            Err(vortex_err!("RoaringInt can only encode primitive arrays"))
+            vortex_bail!("RoaringInt can only encode primitive arrays")
         }
     }
 }
@@ -106,19 +107,16 @@ mod test {
     use vortex::array::PrimitiveArray;
     use vortex::compute::unary::scalar_at;
     use vortex::IntoArray;
-    use vortex_error::VortexResult;
 
     use crate::RoaringIntArray;
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    pub fn test_scalar_at() -> VortexResult<()> {
+    pub fn test_scalar_at() {
         let ints = PrimitiveArray::from(vec![2u32, 12, 22, 32]).into_array();
-        let array = RoaringIntArray::encode(ints)?;
+        let array = RoaringIntArray::encode(ints).unwrap();
 
         assert_eq!(scalar_at(&array, 0).unwrap(), 2u32.into());
         assert_eq!(scalar_at(&array, 1).unwrap(), 12u32.into());
-
-        Ok(())
     }
 }

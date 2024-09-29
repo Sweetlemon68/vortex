@@ -11,100 +11,67 @@
 
 -e file:.
 -e file:pyvortex
-babel==2.14.0
-    # via mkdocs-material
-bracex==2.4
-    # via wcmatch
-certifi==2024.2.2
-    # via requests
+accessible-pygments==0.0.5
+alabaster==1.0.0
+asttokens==2.4.1
+babel==2.16.0
+beautifulsoup4==4.12.3
+certifi==2024.8.30
 charset-normalizer==3.3.2
-    # via requests
-click==8.1.7
-    # via mkdocs
-colorama==0.4.6
-    # via mkdocs-material
-ghp-import==2.1.0
-    # via mkdocs
-idna==3.6
-    # via requests
-importlib-metadata==7.1.0
-    # via mike
-importlib-resources==6.4.0
-    # via mike
+contourpy==1.3.0
+cycler==0.12.1
+decorator==5.1.1
+docutils==0.21.2
+executing==2.0.1
+fonttools==4.53.1
+idna==3.8
+imagesize==1.4.1
 iniconfig==2.0.0
-    # via pytest
+ipython==8.26.0
+jedi==0.19.1
 jinja2==3.1.3
-    # via mike
-    # via mkdocs
-    # via mkdocs-material
-markdown==3.6
-    # via mkdocs
-    # via mkdocs-material
-    # via pymdown-extensions
+kiwisolver==1.4.7
 markupsafe==2.1.5
-    # via jinja2
-    # via mkdocs
-maturin==1.5.1
-mergedeep==1.3.4
-    # via mkdocs
-mike==2.0.0
-mkdocs==1.5.3
-    # via mike
-    # via mkdocs-include-markdown-plugin
-    # via mkdocs-material
-mkdocs-include-markdown-plugin==6.0.5
-mkdocs-material==9.5.17
-mkdocs-material-extensions==1.3.1
-    # via mkdocs-material
+matplotlib==3.9.2
+matplotlib-inline==0.1.7
+maturin==1.7.4
 numpy==1.26.4
-    # via pyarrow
 packaging==24.0
-    # via mkdocs
-    # via pytest
-paginate==0.5.6
-    # via mkdocs-material
-pathspec==0.12.1
-    # via mkdocs
+pandas==2.2.2
+parso==0.8.4
+pexpect==4.9.0
+pillow==10.4.0
 pip==24.0
-platformdirs==4.2.0
-    # via mkdocs
 pluggy==1.4.0
-    # via pytest
+prompt-toolkit==3.0.47
+ptyprocess==0.7.0
+pure-eval==0.2.3
 py-cpuinfo==9.0.0
-    # via pytest-benchmark
 pyarrow==15.0.2
+pydata-sphinx-theme==0.15.4
 pygments==2.17.2
-    # via mkdocs-material
-pymdown-extensions==10.7.1
-    # via mkdocs-material
 pyparsing==3.1.2
-    # via mike
 pytest==8.1.1
-    # via pytest-benchmark
 pytest-benchmark==4.0.0
 python-dateutil==2.9.0.post0
-    # via ghp-import
-pyyaml==6.0.1
-    # via mike
-    # via mkdocs
-    # via pymdown-extensions
-    # via pyyaml-env-tag
-pyyaml-env-tag==0.1
-    # via mkdocs
-regex==2023.12.25
-    # via mkdocs-material
-requests==2.31.0
-    # via mkdocs-material
+pytz==2024.1
+pyvortex==0.2.3
+requests==2.32.3
 ruff==0.3.5
 six==1.16.0
-    # via python-dateutil
-urllib3==2.2.1
-    # via requests
-verspec==0.1.0
-    # via mike
-watchdog==4.0.0
-    # via mkdocs
-wcmatch==8.5.1
-    # via mkdocs-include-markdown-plugin
-zipp==3.18.1
-    # via importlib-metadata
+snowballstemmer==2.2.0
+soupsieve==2.6
+sphinx==8.0.2
+sphinxcontrib-applehelp==2.0.0
+sphinxcontrib-devhelp==2.0.0
+sphinxcontrib-htmlhelp==2.1.0
+sphinxcontrib-jsmath==1.0.1
+sphinxcontrib-qthelp==2.0.0
+sphinxcontrib-serializinghtml==2.0.0
+stack-data==0.6.3
+traitlets==5.14.3
+typing-extensions==4.12.2
+tzdata==2024.1
+urllib3==2.2.2
+wcwidth==0.2.13
+xarray==2024.7.0

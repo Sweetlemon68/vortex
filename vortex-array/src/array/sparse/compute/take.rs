@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::convert::identity;
 
 use itertools::Itertools;
 use vortex_dtype::match_each_integer_ptype;
@@ -19,15 +20,14 @@ impl TakeFn for SparseArray {
             take_search_sorted(self, &flat_indices)?
         };
 
-        let taken_values = take(&self.values(), &physical_take_indices.into_array())?;
+        let taken_values = take(self.values(), physical_take_indices)?;
 
         Ok(Self::try_new(
             positions.into_array(),
             taken_values,
             indices.len(),
             self.fill_value().clone(),
-        )
-        .expect("Must be valid SparseArray")
+        )?
         .into_array())
     }
 }
@@ -67,10 +67,10 @@ fn take_search_sorted(
             .enumerate()
             .map(|(pos, i)| {
                 array
-                    .find_index(*i as usize)
-                    .map(|r| r.map(|ii| (pos as u64, ii as u64)))
+                    .search_index(*i as usize)
+                    .map(|r| r.to_found().map(|ii| (pos as u64, ii as u64)))
             })
-            .filter_map_ok(|r| r)
+            .filter_map_ok(identity)
             .collect::<VortexResult<Vec<_>>>()?
     });
 
@@ -110,7 +110,7 @@ mod test {
     fn sparse_take() {
         let sparse = sparse_array();
         let taken =
-            SparseArray::try_from(take(&sparse, &vec![0, 47, 47, 0, 99].into_array()).unwrap())
+            SparseArray::try_from(take(sparse, vec![0, 47, 47, 0, 99].into_array()).unwrap())
                 .unwrap();
         assert_eq!(
             taken
@@ -133,7 +133,7 @@ mod test {
     #[test]
     fn nonexistent_take() {
         let sparse = sparse_array();
-        let taken = SparseArray::try_from(take(&sparse, &vec![69].into_array()).unwrap()).unwrap();
+        let taken = SparseArray::try_from(take(sparse, vec![69].into_array()).unwrap()).unwrap();
         assert!(taken
             .indices()
             .into_primitive()
@@ -152,7 +152,7 @@ mod test {
     fn ordered_take() {
         let sparse = sparse_array();
         let taken =
-            SparseArray::try_from(take(&sparse, &vec![69, 37].into_array()).unwrap()).unwrap();
+            SparseArray::try_from(take(&sparse, vec![69, 37].into_array()).unwrap()).unwrap();
         assert_eq!(
             taken
                 .indices()

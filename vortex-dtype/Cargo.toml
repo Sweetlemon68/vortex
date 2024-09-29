@@ -1,7 +1,7 @@
 [package]
 name = "vortex-dtype"
 version = { workspace = true }
-description = "Vortex schema"
+description = "Vortex's core type system"
 homepage = { workspace = true }
 repository = { workspace = true }
 authors = { workspace = true }
@@ -10,6 +10,7 @@ keywords = { workspace = true }
 include = { workspace = true }
 edition = { workspace = true }
 rust-version = { workspace = true }
+readme = { workspace = true }
 
 [lib]
 name = "vortex_dtype"
@@ -17,6 +18,7 @@ path = "src/lib.rs"
 bench = false
 
 [dependencies]
+arbitrary = { workspace = true, optional = true }
 flatbuffers = { workspace = true, optional = true }
 half = { workspace = true, features = ["num-traits"] }
 itertools = { workspace = true }
@@ -35,13 +37,12 @@ serde_test = { workspace = true }
 workspace = true
 
 [features]
-# Uncomment for improved IntelliJ support
 flatbuffers = [
     "dep:flatbuffers",
     "dep:vortex-flatbuffers",
     "vortex-error/flatbuffers",
     # enable flatbuffers generated code for scalar
-    "vortex-flatbuffers/dtype"
+    "vortex-flatbuffers/dtype",
 ]
 proto = ["dep:prost", "vortex-proto/dtype"]
 serde = ["dep:serde"]

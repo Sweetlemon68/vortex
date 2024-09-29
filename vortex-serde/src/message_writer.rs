@@ -85,7 +85,7 @@ impl<W: VortexWrite> MessageWriter<W> {
         Ok(())
     }
 
-    async fn write_message<F: WriteFlatBuffer>(&mut self, flatbuffer: F) -> io::Result<()> {
+    pub async fn write_message<F: WriteFlatBuffer>(&mut self, flatbuffer: F) -> io::Result<()> {
         // We reuse the scratch buffer each time and then replace it at the end.
         // The scratch buffer may be missing if a previous write failed. We could use scopeguard
         // or similar here if it becomes a problem in practice.
@@ -112,7 +112,7 @@ impl<W: VortexWrite> MessageWriter<W> {
         self.write_all(((aligned_size - 4) as u32).to_le_bytes())
             .await?;
         let buffer = self
-            .write_all(buffer.slice(buffer_begin, buffer_end))
+            .write_all(buffer.slice_owned(buffer_begin..buffer_end))
             .await?
             .into_inner();
         self.write_all(&ZEROS[0..padding_bytes]).await?;

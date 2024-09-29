@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use vortex::array::PrimitiveArray;
+use vortex::encoding::ids;
 use vortex::stats::{ArrayStatisticsCompute, StatsSet};
 use vortex::validity::{ArrayValidity, LogicalValidity};
 use vortex::variants::{ArrayVariants, PrimitiveArrayTrait};
@@ -9,28 +10,26 @@ use vortex::{
     IntoCanonical,
 };
 use vortex_dtype::{DType, PType};
-use vortex_error::{vortex_bail, vortex_err, VortexResult};
+use vortex_error::{
+    vortex_bail, vortex_err, vortex_panic, VortexExpect as _, VortexResult, VortexUnwrap as _,
+};
 
 use crate::compress::zigzag_encode;
 use crate::zigzag_decode;
 
-impl_encoding!("vortex.zigzag", 21u16, ZigZag);
+impl_encoding!("vortex.zigzag", ids::ZIGZAG, ZigZag);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZigZagMetadata;
 
 impl ZigZagArray {
-    pub fn new(encoded: Array) -> Self {
-        Self::try_new(encoded).unwrap()
-    }
-
     pub fn try_new(encoded: Array) -> VortexResult<Self> {
         let encoded_dtype = encoded.dtype().clone();
         if !encoded_dtype.is_unsigned_int() {
             vortex_bail!(MismatchedTypes: "unsigned int", encoded_dtype);
         }
 
-        let dtype = DType::from(PType::try_from(&encoded_dtype).expect("ptype").to_signed())
+        let dtype = DType::from(PType::try_from(&encoded_dtype)?.to_signed())
             .with_nullability(encoded_dtype.nullability());
 
         let len = encoded.len();
@@ -42,16 +41,22 @@ impl ZigZagArray {
     pub fn encode(array: &Array) -> VortexResult<Array> {
         PrimitiveArray::try_from(array)
             .map_err(|_| vortex_err!("ZigZag can only encoding primitive arrays"))
-            .map(|parray| zigzag_encode(&parray))?
-            .map(|encoded| encoded.into_array())
+            .and_then(zigzag_encode)
+            .map(|a| a.into_array())
     }
 
     pub fn encoded(&self) -> Array {
-        let ptype = PType::try_from(self.dtype()).expect("ptype");
+        let ptype = PType::try_from(self.dtype()).unwrap_or_else(|err| {
+            vortex_panic!(err, "Failed to convert DType {} to PType", self.dtype())
+        });
         let encoded = DType::from(ptype.to_unsigned()).with_nullability(self.dtype().nullability());
-        self.array()
+        self.as_ref()
             .child(0, &encoded, self.len())
-            .expect("Missing encoded array")
+            .vortex_expect("ZigZagArray is missing its encoded child array")
+    }
+
+    pub fn ptype(&self) -> PType {
+        PType::try_from(self.dtype()).vortex_unwrap()
     }
 }
 
@@ -85,8 +90,6 @@ impl ArrayStatisticsCompute for ZigZagArray {}
 
 impl IntoCanonical for ZigZagArray {
     fn into_canonical(self) -> VortexResult<Canonical> {
-        Ok(Canonical::Primitive(zigzag_decode(
-            &self.encoded().into_primitive()?,
-        )))
+        zigzag_decode(self.encoded().into_primitive()?).map(Canonical::Primitive)
     }
 }

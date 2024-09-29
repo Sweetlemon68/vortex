@@ -3,9 +3,10 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use itertools::Itertools;
-use vortex_error::{vortex_bail, VortexResult};
+use vortex_error::{vortex_bail, vortex_err, VortexResult};
 use DType::*;
 
+use crate::field::Field;
 use crate::nullability::Nullability;
 use crate::{ExtDType, PType};
 
@@ -50,7 +51,7 @@ impl DType {
             Primitive(_, n) => matches!(n, Nullable),
             Utf8(n) => matches!(n, Nullable),
             Binary(n) => matches!(n, Nullable),
-            Struct(st, _) => st.dtypes().iter().all(|f| f.is_nullable()),
+            Struct(_, n) => matches!(n, Nullable),
             List(_, n) => matches!(n, Nullable),
             Extension(_, n) => matches!(n, Nullable),
         }
@@ -83,6 +84,22 @@ impl DType {
 
     pub fn is_struct(&self) -> bool {
         matches!(self, Struct(_, _))
+    }
+
+    pub fn is_unsigned_int(&self) -> bool {
+        PType::try_from(self).is_ok_and(PType::is_unsigned_int)
+    }
+
+    pub fn is_signed_int(&self) -> bool {
+        PType::try_from(self).is_ok_and(PType::is_signed_int)
+    }
+
+    pub fn is_int(&self) -> bool {
+        PType::try_from(self).is_ok_and(PType::is_int)
+    }
+
+    pub fn is_float(&self) -> bool {
+        PType::try_from(self).is_ok_and(PType::is_float)
     }
 
     pub fn is_boolean(&self) -> bool {
@@ -156,14 +173,22 @@ impl StructDType {
         &self.dtypes
     }
 
-    pub fn project(&self, indices: &[usize]) -> VortexResult<Self> {
-        let mut names = vec![];
-        let mut dtypes = vec![];
+    pub fn project(&self, projection: &[Field]) -> VortexResult<Self> {
+        let mut names = Vec::with_capacity(projection.len());
+        let mut dtypes = Vec::with_capacity(projection.len());
 
-        for &idx in indices.iter() {
-            if idx > self.names.len() {
-                vortex_bail!("Projection column is out of bounds");
-            }
+        for field in projection.iter() {
+            let idx = match field {
+                Field::Name(n) => self
+                    .find_name(n.as_ref())
+                    .ok_or_else(|| vortex_err!("Unknown field {n}"))?,
+                Field::Index(i) => {
+                    if *i > self.names.len() {
+                        vortex_bail!("Projection column is out of bounds");
+                    }
+                    *i
+                }
+            };
 
             names.push(self.names[idx].clone());
             dtypes.push(self.dtypes[idx].clone());
@@ -178,9 +203,19 @@ mod test {
     use std::mem;
 
     use crate::dtype::DType;
+    use crate::{Nullability, StructDType};
 
     #[test]
     fn size_of() {
         assert_eq!(mem::size_of::<DType>(), 40);
+    }
+
+    #[test]
+    fn is_nullable() {
+        assert!(!DType::Struct(
+            StructDType::new(vec![].into(), Vec::new()),
+            Nullability::NonNullable
+        )
+        .is_nullable());
     }
 }

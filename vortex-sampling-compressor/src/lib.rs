@@ -1,7 +1,11 @@
 use std::collections::HashSet;
 use std::fmt::{Debug, Display, Formatter};
 
+use compressors::fsst::FSSTCompressor;
+use lazy_static::lazy_static;
 use log::{debug, info, warn};
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use vortex::array::{Chunked, ChunkedArray, Constant, Struct, StructArray};
 use vortex::compress::{check_dtype_unchanged, check_validity_unchanged, CompressionStrategy};
 use vortex::compute::slice;
@@ -25,27 +29,51 @@ use crate::compressors::zigzag::ZigZagCompressor;
 use crate::compressors::{CompressedArray, CompressionTree, CompressorRef, EncodingCompressor};
 use crate::sampling::stratified_slices;
 
+#[cfg(feature = "arbitrary")]
+pub mod arbitrary;
 pub mod compressors;
 mod sampling;
 
+lazy_static! {
+    pub static ref ALL_COMPRESSORS: [CompressorRef<'static>; 11] = [
+        &ALPCompressor as CompressorRef,
+        &BitPackedCompressor,
+        &DateTimePartsCompressor,
+        &DEFAULT_RUN_END_COMPRESSOR,
+        // TODO(robert): Implement minimal compute for DeltaArrays - scalar_at and slice
+        // &DeltaCompressor,
+        &DictCompressor,
+        &FoRCompressor,
+        &FSSTCompressor,
+        &RoaringBoolCompressor,
+        &RoaringIntCompressor,
+        &SparseCompressor,
+        &ZigZagCompressor,
+    ];
+}
+
 #[derive(Debug, Clone)]
 pub struct CompressConfig {
-    #[allow(dead_code)]
-    block_size: u32,
     sample_size: u16,
     sample_count: u16,
     max_depth: u8,
+    target_block_bytesize: usize,
+    target_block_size: usize,
+    rng_seed: u64,
 }
 
 impl Default for CompressConfig {
     fn default() -> Self {
-        // TODO(ngates): we should ensure that sample_size * sample_count <= block_size
+        let kib = 1 << 10;
+        let mib = 1 << 20;
         Self {
-            block_size: 65_536,
             // Sample length should always be multiple of 1024
             sample_size: 128,
             sample_count: 8,
             max_depth: 3,
+            target_block_bytesize: 16 * mib,
+            target_block_size: 64 * kib,
+            rng_seed: 0,
         }
     }
 }
@@ -68,8 +96,9 @@ impl Display for SamplingCompressor<'_> {
 }
 
 impl CompressionStrategy for SamplingCompressor<'_> {
+    #[allow(clippy::same_name_method)]
     fn compress(&self, array: &Array) -> VortexResult<Array> {
-        Self::compress(self, array, None).map(|c| c.into_array())
+        Self::compress(self, array, None).map(compressors::CompressedArray::into_array)
     }
 
     fn used_encodings(&self) -> HashSet<EncodingRef> {
@@ -82,20 +111,7 @@ impl CompressionStrategy for SamplingCompressor<'_> {
 
 impl Default for SamplingCompressor<'_> {
     fn default() -> Self {
-        Self::new(HashSet::from([
-            &ALPCompressor as CompressorRef,
-            &BitPackedCompressor,
-            // TODO(robert): Implement minimal compute for DeltaArrays - scalar_at and slice
-            // &DeltaCompressor,
-            &DictCompressor,
-            &FoRCompressor,
-            &DateTimePartsCompressor,
-            &RoaringBoolCompressor,
-            &RoaringIntCompressor,
-            &DEFAULT_RUN_END_COMPRESSOR,
-            &SparseCompressor,
-            &ZigZagCompressor,
-        ]))
+        Self::new(HashSet::from(*ALL_COMPRESSORS))
     }
 }
 
@@ -149,6 +165,7 @@ impl<'a> SamplingCompressor<'a> {
         cloned
     }
 
+    #[allow(clippy::same_name_method)]
     pub fn compress(
         &self,
         arr: &Array,
@@ -163,8 +180,8 @@ impl<'a> SamplingCompressor<'a> {
             if let Some(compressed) = l.compress(arr, self) {
                 let compressed = compressed?;
 
-                check_validity_unchanged(arr, compressed.array());
-                check_dtype_unchanged(arr, compressed.array());
+                check_validity_unchanged(arr, compressed.as_ref());
+                check_dtype_unchanged(arr, compressed.as_ref());
                 return Ok(compressed);
             } else {
                 warn!(
@@ -177,8 +194,8 @@ impl<'a> SamplingCompressor<'a> {
         // Otherwise, attempt to compress the array
         let compressed = self.compress_array(arr)?;
 
-        check_validity_unchanged(arr, compressed.array());
-        check_dtype_unchanged(arr, compressed.array());
+        check_validity_unchanged(arr, compressed.as_ref());
+        check_dtype_unchanged(arr, compressed.as_ref());
         Ok(compressed)
     }
 
@@ -192,11 +209,17 @@ impl<'a> SamplingCompressor<'a> {
     fn compress_array(&self, arr: &Array) -> VortexResult<CompressedArray<'a>> {
         match arr.encoding().id() {
             Chunked::ID => {
-                // For chunked arrays, we compress each chunk individually
                 let chunked = ChunkedArray::try_from(arr)?;
-                let compressed_chunks = chunked
+                let less_chunked = chunked.rechunk(
+                    self.options().target_block_bytesize,
+                    self.options().target_block_size,
+                )?;
+                let compressed_chunks = less_chunked
                     .chunks()
-                    .map(|chunk| self.compress_array(&chunk).map(|a| a.into_array()))
+                    .map(|chunk| {
+                        self.compress_array(&chunk)
+                            .map(compressors::CompressedArray::into_array)
+                    })
                     .collect::<VortexResult<Vec<_>>>()?;
                 Ok(CompressedArray::uncompressed(
                     ChunkedArray::try_new(compressed_chunks, chunked.dtype().clone())?.into_array(),
@@ -211,7 +234,10 @@ impl<'a> SamplingCompressor<'a> {
                 let strct = StructArray::try_from(arr)?;
                 let compressed_fields = strct
                     .children()
-                    .map(|field| self.compress_array(&field).map(|a| a.into_array()))
+                    .map(|field| {
+                        self.compress_array(&field)
+                            .map(compressors::CompressedArray::into_array)
+                    })
                     .collect::<VortexResult<Vec<_>>>()?;
                 let validity = self.compress_validity(strct.validity())?;
                 Ok(CompressedArray::uncompressed(
@@ -226,7 +252,8 @@ impl<'a> SamplingCompressor<'a> {
             }
             _ => {
                 // Otherwise, we run sampled compression over pluggable encodings
-                let sampled = sampled_compression(arr, self)?;
+                let mut rng = StdRng::seed_from_u64(self.options.rng_seed);
+                let sampled = sampled_compression(arr, self, &mut rng)?;
                 Ok(sampled.unwrap_or_else(|| CompressedArray::uncompressed(arr.clone())))
             }
         }
@@ -236,6 +263,7 @@ impl<'a> SamplingCompressor<'a> {
 fn sampled_compression<'a>(
     array: &Array,
     compressor: &SamplingCompressor<'a>,
+    rng: &mut StdRng,
 ) -> VortexResult<Option<CompressedArray<'a>>> {
     // First, we try constant compression and shortcut any sampling.
     if let Some(cc) = ConstantCompressor.can_compress(array) {
@@ -299,6 +327,7 @@ fn sampled_compression<'a>(
             array.len(),
             compressor.options.sample_size,
             compressor.options.sample_count,
+            rng,
         )
         .into_iter()
         .map(|(start, stop)| slice(array, start, stop))

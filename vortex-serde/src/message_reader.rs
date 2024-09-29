@@ -8,13 +8,13 @@ use vortex::stream::{ArrayStream, ArrayStreamAdapter};
 use vortex::{Array, ArrayView, Context, IntoArray};
 use vortex_buffer::Buffer;
 use vortex_dtype::DType;
-use vortex_error::{vortex_bail, vortex_err, VortexError, VortexResult};
+use vortex_error::{vortex_bail, vortex_err, VortexResult};
 use vortex_flatbuffers::{message as fb, ReadFlatBuffer};
 
 use crate::io::VortexRead;
 use crate::messages::IPCDType;
 
-const FLATBUFFER_SIZE_LENGTH: usize = 4;
+pub const FLATBUFFER_SIZE_LENGTH: usize = 4;
 
 pub struct MessageReader<R> {
     read: R,
@@ -78,7 +78,7 @@ impl<R: VortexRead> MessageReader<R> {
 
     async fn next(&mut self) -> VortexResult<Buffer> {
         if self.finished {
-            vortex_bail!("Reader is finished, should've checked peek!")
+            vortex_bail!("Reader is finished, should've peeked!")
         }
         self.prev_message = self.message.split();
         if !self.load_next_message().await? {
@@ -95,7 +95,9 @@ impl<R: VortexRead> MessageReader<R> {
         let buf = self.next().await?;
         let msg = unsafe { root_unchecked::<fb::Message>(&buf) }
             .header_as_schema()
-            .expect("Checked earlier in the function");
+            .ok_or_else(|| {
+                vortex_err!("Expected schema message; this was checked earlier in the function")
+            })?;
 
         Ok(IPCDType::read_flatbuffer(&msg)?.0)
     }
@@ -124,15 +126,6 @@ impl<R: VortexRead> MessageReader<R> {
 
         let _ = self.next().await?;
         array_reader.into_array(ctx, dtype).map(Some)
-    }
-
-    /// Construct an ArrayStream pulling the DType from the stream.
-    pub async fn array_stream_from_messages(
-        &mut self,
-        ctx: Arc<Context>,
-    ) -> VortexResult<impl ArrayStream + '_> {
-        let dtype = self.read_dtype().await?;
-        Ok(self.array_stream(ctx, dtype))
     }
 
     pub fn array_stream(&mut self, ctx: Arc<Context>, dtype: DType) -> impl ArrayStream + '_ {
@@ -207,6 +200,10 @@ impl<R: VortexRead> MessageReader<R> {
         let _ = self.next().await?;
         page_buffer
     }
+
+    pub fn into_inner(self) -> R {
+        self.read
+    }
 }
 
 pub enum ReadState {
@@ -257,9 +254,13 @@ impl ArrayBufferReader {
                 Ok(Some(bytes.get_u32_le() as usize))
             }
             ReadState::ReadingFb => {
-                let batch = root::<fb::Message>(&bytes)?
-                    .header_as_batch()
-                    .ok_or_else(|| vortex_err!("Message was not a batch"))?;
+                // SAFETY: Assumes that any flatbuffer bytes passed have been validated.
+                //     This is currently the case in stream and file implementations.
+                let batch = unsafe {
+                    root_unchecked::<fb::Message>(&bytes)
+                        .header_as_batch()
+                        .ok_or_else(|| vortex_err!("Message was not a batch"))?
+                };
                 let buffer_size = batch.buffer_size() as usize;
                 self.fb_msg = Some(Buffer::from(bytes));
                 self.state = ReadState::ReadingBuffers;
@@ -269,14 +270,7 @@ impl ArrayBufferReader {
                 // Split out into individual buffers
                 // Initialize the column's buffers for a vectored read.
                 // To start with, we include the padding and then truncate the buffers after.
-                // let all_buffers_size = self.fb_msg.expect()
-                let batch_msg = unsafe {
-                    root_unchecked::<fb::Message>(
-                        self.fb_msg.as_ref().expect("Populated in previous step"),
-                    )
-                }
-                .header_as_batch()
-                .ok_or_else(|| vortex_err!("Checked in previous step"))?;
+                let batch_msg = self.fb_bytes_as_batch()?;
                 let all_buffers_size = batch_msg.buffer_size();
                 let ipc_buffers = batch_msg.buffers().unwrap_or_default();
                 let buffers = ipc_buffers
@@ -284,7 +278,7 @@ impl ArrayBufferReader {
                     .zip(
                         ipc_buffers
                             .iter()
-                            .map(|b| b.offset())
+                            .map(vortex_flatbuffers::message::Buffer::offset)
                             .skip(1)
                             .chain([all_buffers_size]),
                     )
@@ -310,15 +304,22 @@ impl ArrayBufferReader {
 
     fn fb_bytes_as_batch(&self) -> VortexResult<fb::Batch> {
         unsafe {
-            root_unchecked::<fb::Message>(self.fb_msg.as_ref().expect("Populated in previous step"))
+            root_unchecked::<fb::Message>(
+                self.fb_msg
+                    .as_ref()
+                    .ok_or_else(|| vortex_err!("Populated in previous step"))?,
+            )
         }
         .header_as_batch()
         .ok_or_else(|| vortex_err!("Checked in previous step"))
     }
 
+    /// Produce the array buffered in the reader
     pub fn into_array(self, ctx: Arc<Context>, dtype: DType) -> VortexResult<Array> {
         let length = self.fb_bytes_as_batch()?.length() as usize;
-        let fb_msg = self.fb_msg.expect("Populated in previous step");
+        let fb_msg = self
+            .fb_msg
+            .ok_or_else(|| vortex_err!("Populated in previous step"))?;
         let view = ArrayView::try_new(
             ctx,
             dtype,
@@ -327,18 +328,14 @@ impl ArrayBufferReader {
             |flatbuffer| {
                 unsafe { root_unchecked::<fb::Message>(flatbuffer) }
                     .header_as_batch()
-                    .unwrap()
+                    .ok_or_else(|| vortex_err!("Failed to get root header as batch"))?
                     .array()
                     .ok_or_else(|| vortex_err!("Chunk missing Array"))
             },
             self.buffers,
         )?;
 
-        let array = view.into_array();
-        // Validate it
-        array.with_dyn(|_| Ok::<(), VortexError>(()))?;
-
-        Ok(array)
+        Ok(view.into_array())
     }
 }
 

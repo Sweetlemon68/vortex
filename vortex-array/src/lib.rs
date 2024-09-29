@@ -8,6 +8,7 @@
 //! Every data type recognized by Vortex also has a canonical physical encoding format, which
 //! arrays can be [canonicalized](Canonical) into for ease of access in compute functions.
 //!
+
 use std::fmt::{Debug, Display, Formatter};
 use std::future::ready;
 
@@ -22,10 +23,10 @@ pub use typed::*;
 pub use view::*;
 use vortex_buffer::Buffer;
 use vortex_dtype::DType;
-use vortex_error::VortexResult;
+use vortex_error::{vortex_panic, VortexExpect, VortexResult};
 
 use crate::compute::ArrayCompute;
-use crate::encoding::{ArrayEncodingRef, EncodingRef};
+use crate::encoding::{ArrayEncodingRef, EncodingId, EncodingRef};
 use crate::iter::{ArrayIterator, ArrayIteratorAdapter};
 use crate::stats::{ArrayStatistics, ArrayStatisticsCompute};
 use crate::stream::{ArrayStream, ArrayStreamAdapter};
@@ -41,10 +42,12 @@ pub mod compress;
 pub mod compute;
 mod context;
 mod data;
+pub mod elementwise;
 pub mod encoding;
 mod implementation;
 pub mod iter;
 mod metadata;
+pub mod opaque;
 pub mod stats;
 pub mod stream;
 mod tree;
@@ -73,6 +76,7 @@ impl Array {
         }
     }
 
+    #[allow(clippy::same_name_method)]
     pub fn len(&self) -> usize {
         match self {
             Self::Data(d) => d.len(),
@@ -91,7 +95,7 @@ impl Array {
         self.with_dyn(|a| a.nbytes())
     }
 
-    pub fn child<'a>(&'a self, idx: usize, dtype: &'a DType, len: usize) -> Option<Self> {
+    pub fn child<'a>(&'a self, idx: usize, dtype: &'a DType, len: usize) -> VortexResult<Self> {
         match self {
             Self::Data(d) => d.child(idx, dtype, len).cloned(),
             Self::View(v) => v.child(idx, dtype, len).map(Array::View),
@@ -114,6 +118,15 @@ impl Array {
 
     pub fn depth_first_traversal(&self) -> ArrayChildrenIterator {
         ArrayChildrenIterator::new(self.clone())
+    }
+
+    /// Count the number of cumulative buffers encoded by self.
+    pub fn cumulative_nbuffers(&self) -> usize {
+        self.children()
+            .iter()
+            .map(|child| child.cumulative_nbuffers())
+            .sum::<usize>()
+            + if self.buffer().is_some() { 1 } else { 0 }
     }
 
     /// Return the buffer offsets and the total length of all buffers, assuming the given alignment.
@@ -160,6 +173,52 @@ impl Array {
             futures_util::stream::once(ready(Ok(self))),
         )
     }
+
+    /// Checks whether array is of given encoding
+    pub fn is_encoding(&self, id: EncodingId) -> bool {
+        self.encoding().id() == id
+    }
+
+    #[inline]
+    pub fn with_dyn<R, F>(&self, mut f: F) -> R
+    where
+        F: FnMut(&dyn ArrayTrait) -> R,
+    {
+        let mut result = None;
+
+        self.encoding()
+            .with_dyn(self, &mut |array| {
+                // Sanity check that the encoding implements the correct array trait
+                debug_assert!(
+                    match array.dtype() {
+                        DType::Null => array.as_null_array().is_some(),
+                        DType::Bool(_) => array.as_bool_array().is_some(),
+                        DType::Primitive(..) => array.as_primitive_array().is_some(),
+                        DType::Utf8(_) => array.as_utf8_array().is_some(),
+                        DType::Binary(_) => array.as_binary_array().is_some(),
+                        DType::Struct(..) => array.as_struct_array().is_some(),
+                        DType::List(..) => array.as_list_array().is_some(),
+                        DType::Extension(..) => array.as_extension_array().is_some(),
+                    },
+                    "Encoding {} does not implement the variant trait for {}",
+                    self.encoding().id(),
+                    array.dtype()
+                );
+
+                result = Some(f(array));
+                Ok(())
+            })
+            .unwrap_or_else(|err| {
+                vortex_panic!(
+                    err,
+                    "Failed to convert Array to {}",
+                    std::any::type_name::<dyn ArrayTrait>()
+                )
+            });
+
+        // Now we unwrap the optional, which we know to be populated by the closure.
+        result.vortex_expect("Failed to get result from Array::with_dyn")
+    }
 }
 
 /// A depth-first pre-order iterator over a ArrayData.
@@ -193,8 +252,8 @@ pub trait IntoArray {
     fn into_array(self) -> Array;
 }
 
-pub trait AsArray {
-    fn as_array_ref(&self) -> &Array;
+pub trait ToArrayData {
+    fn to_array_data(&self) -> ArrayData;
 }
 
 /// Collects together the behaviour of an array.
@@ -209,10 +268,12 @@ pub trait ArrayTrait:
     + AcceptArrayVisitor
     + ArrayStatistics
     + ArrayStatisticsCompute
+    + ToArrayData
 {
     fn nbytes(&self) -> usize {
         let mut visitor = NBytesVisitor(0);
-        self.accept(&mut visitor).unwrap();
+        self.accept(&mut visitor)
+            .vortex_expect("Failed to get nbytes from Array");
         visitor.0
     }
 }
@@ -242,43 +303,6 @@ impl ArrayVisitor for NBytesVisitor {
     }
 }
 
-impl Array {
-    #[inline]
-    pub fn with_dyn<R, F>(&self, mut f: F) -> R
-    where
-        F: FnMut(&dyn ArrayTrait) -> R,
-    {
-        let mut result = None;
-
-        self.encoding()
-            .with_dyn(self, &mut |array| {
-                // Sanity check that the encoding implements the correct array trait
-                debug_assert!(
-                    match array.dtype() {
-                        DType::Null => array.as_null_array().is_some(),
-                        DType::Bool(_) => array.as_bool_array().is_some(),
-                        DType::Primitive(..) => array.as_primitive_array().is_some(),
-                        DType::Utf8(_) => array.as_utf8_array().is_some(),
-                        DType::Binary(_) => array.as_binary_array().is_some(),
-                        DType::Struct(..) => array.as_struct_array().is_some(),
-                        DType::List(..) => array.as_list_array().is_some(),
-                        DType::Extension(..) => array.as_extension_array().is_some(),
-                    },
-                    "Encoding {} does not implement the variant trait for {}",
-                    self.encoding().id(),
-                    array.dtype()
-                );
-
-                result = Some(f(array));
-                Ok(())
-            })
-            .unwrap();
-
-        // Now we unwrap the optional, which we know to be populated by the closure.
-        result.unwrap()
-    }
-}
-
 impl Display for Array {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let prefix = match self {
@@ -293,5 +317,14 @@ impl Display for Array {
             self.dtype(),
             self.len()
         )
+    }
+}
+
+impl ToArrayData for Array {
+    fn to_array_data(&self) -> ArrayData {
+        match self {
+            Self::Data(d) => d.clone(),
+            Self::View(_) => self.with_dyn(|a| a.to_array_data()),
+        }
     }
 }

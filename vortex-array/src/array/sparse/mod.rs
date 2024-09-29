@@ -1,11 +1,12 @@
 use ::serde::{Deserialize, Serialize};
 use vortex_dtype::{match_each_integer_ptype, DType};
-use vortex_error::{vortex_bail, VortexResult};
+use vortex_error::{vortex_bail, vortex_panic, VortexExpect as _, VortexResult};
 use vortex_scalar::Scalar;
 
 use crate::array::constant::ConstantArray;
 use crate::compute::unary::scalar_at;
-use crate::compute::{search_sorted, SearchSortedSide};
+use crate::compute::{search_sorted, SearchResult, SearchSortedSide};
+use crate::encoding::ids;
 use crate::stats::{ArrayStatisticsCompute, StatsSet};
 use crate::validity::{ArrayValidity, LogicalValidity};
 use crate::visitor::{AcceptArrayVisitor, ArrayVisitor};
@@ -15,7 +16,7 @@ mod compute;
 mod flatten;
 mod variants;
 
-impl_encoding!("vortex.sparse", 9u16, Sparse);
+impl_encoding!("vortex.sparse", ids::SPARSE, Sparse);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SparseMetadata {
@@ -62,6 +63,14 @@ impl SparseArray {
             );
         }
 
+        if !indices.is_empty() {
+            let last_index = usize::try_from(&scalar_at(&indices, indices.len() - 1)?)?;
+
+            if last_index - indices_offset >= len {
+                vortex_bail!("Array length was set to {len} but the last index is {last_index}");
+            }
+        }
+
         Self::try_from_parts(
             values.dtype().clone(),
             len,
@@ -76,9 +85,7 @@ impl SparseArray {
             StatsSet::new(),
         )
     }
-}
 
-impl SparseArray {
     #[inline]
     pub fn indices_offset(&self) -> usize {
         self.metadata().indices_offset
@@ -86,20 +93,20 @@ impl SparseArray {
 
     #[inline]
     pub fn values(&self) -> Array {
-        self.array()
+        self.as_ref()
             .child(1, self.dtype(), self.metadata().indices_len)
-            .expect("missing child array")
+            .vortex_expect("Missing child array in SparseArray")
     }
 
     #[inline]
     pub fn indices(&self) -> Array {
-        self.array()
+        self.as_ref()
             .child(
                 0,
                 &self.metadata().indices_dtype,
                 self.metadata().indices_len,
             )
-            .expect("missing indices array")
+            .vortex_expect("Missing indices array in SparseArray")
     }
 
     #[inline]
@@ -107,19 +114,21 @@ impl SparseArray {
         &self.metadata().fill_value
     }
 
-    /// Returns the position of a given index in the indices array if it exists.
-    pub fn find_index(&self, index: usize) -> VortexResult<Option<usize>> {
+    /// Returns the position or the insertion point of a given index in the indices array.
+    fn search_index(&self, index: usize) -> VortexResult<SearchResult> {
         search_sorted(
             &self.indices(),
             self.indices_offset() + index,
             SearchSortedSide::Left,
         )
-        .map(|r| r.to_found())
     }
 
     /// Return indices as a vector of usize with the indices_offset applied.
     pub fn resolved_indices(&self) -> Vec<usize> {
-        let flat_indices = self.indices().into_primitive().unwrap();
+        let flat_indices = self
+            .indices()
+            .into_primitive()
+            .vortex_expect("Failed to convert SparseArray indices to primitive array");
         match_each_integer_ptype!(flat_indices.ptype(), |$P| {
             flat_indices
                 .maybe_null_slice::<$P>()
@@ -129,13 +138,18 @@ impl SparseArray {
         })
     }
 
-    pub fn min_index(&self) -> usize {
-        let min_index: usize = scalar_at(&self.indices(), 0)
-            .unwrap()
-            .as_ref()
-            .try_into()
-            .unwrap();
-        min_index - self.indices_offset()
+    /// Return the minimum index if indices are present.
+    ///
+    /// If this sparse array has no indices (i.e. all elements are equal to fill_value)
+    /// then it returns None.
+    pub fn min_index(&self) -> Option<usize> {
+        (!self.indices().is_empty()).then(|| {
+            let min_index: usize = scalar_at(&self.indices(), 0)
+                .and_then(|s| s.as_ref().try_into())
+                .vortex_expect("SparseArray indices is non-empty");
+
+            min_index - self.indices_offset()
+        })
     }
 }
 
@@ -152,9 +166,10 @@ impl ArrayStatisticsCompute for SparseArray {}
 
 impl ArrayValidity for SparseArray {
     fn is_valid(&self, index: usize) -> bool {
-        match self.find_index(index).unwrap() {
-            None => !self.fill_value().is_null(),
-            Some(idx) => self.values().with_dyn(|a| a.is_valid(idx)),
+        match self.search_index(index).map(SearchResult::to_found) {
+            Ok(None) => !self.fill_value().is_null(),
+            Ok(Some(idx)) => self.values().with_dyn(|a| a.is_valid(idx)),
+            Err(e) => vortex_panic!(e, "Error while finding index {} in sparse array", index),
         }
     }
 
@@ -181,8 +196,7 @@ impl ArrayValidity for SparseArray {
                 false.into(),
             )
         }
-        .unwrap();
-
+        .vortex_expect("Error determining logical validity for sparse array");
         LogicalValidity::Array(validity.into_array())
     }
 }
@@ -190,7 +204,7 @@ impl ArrayValidity for SparseArray {
 #[cfg(test)]
 mod test {
     use itertools::Itertools;
-    use vortex_dtype::Nullability::Nullable;
+    use vortex_dtype::Nullability::{self, Nullable};
     use vortex_dtype::{DType, PType};
     use vortex_error::VortexError;
     use vortex_scalar::Scalar;
@@ -252,7 +266,7 @@ mod test {
     pub fn iter_sliced() {
         let p_fill_val = Some(non_nullable_fill().as_ref().try_into().unwrap());
         assert_sparse_array(
-            &slice(&sparse_array(non_nullable_fill()), 2, 7).unwrap(),
+            &slice(sparse_array(non_nullable_fill()), 2, 7).unwrap(),
             &[Some(100), p_fill_val, p_fill_val, Some(200), p_fill_val],
         );
     }
@@ -260,14 +274,14 @@ mod test {
     #[test]
     pub fn iter_sliced_nullable() {
         assert_sparse_array(
-            &slice(&sparse_array(nullable_fill()), 2, 7).unwrap(),
+            &slice(sparse_array(nullable_fill()), 2, 7).unwrap(),
             &[Some(100), None, None, Some(200), None],
         );
     }
 
     #[test]
     pub fn iter_sliced_twice() {
-        let sliced_once = slice(&sparse_array(nullable_fill()), 1, 8).unwrap();
+        let sliced_once = slice(sparse_array(nullable_fill()), 1, 8).unwrap();
         assert_sparse_array(
             &sliced_once,
             &[None, Some(100), None, None, Some(200), None, None],
@@ -281,9 +295,9 @@ mod test {
     #[test]
     pub fn test_find_index() {
         let sparse = SparseArray::try_from(sparse_array(nullable_fill())).unwrap();
-        assert_eq!(sparse.find_index(0).unwrap(), None);
-        assert_eq!(sparse.find_index(2).unwrap(), Some(0));
-        assert_eq!(sparse.find_index(5).unwrap(), Some(1));
+        assert_eq!(sparse.search_index(0).unwrap().to_found(), None);
+        assert_eq!(sparse.search_index(2).unwrap().to_found(), Some(0));
+        assert_eq!(sparse.search_index(5).unwrap().to_found(), Some(1));
     }
 
     #[test]
@@ -303,7 +317,7 @@ mod test {
 
     #[test]
     pub fn scalar_at_sliced() {
-        let sliced = slice(&sparse_array(nullable_fill()), 2, 7).unwrap();
+        let sliced = slice(sparse_array(nullable_fill()), 2, 7).unwrap();
         assert_eq!(
             usize::try_from(&scalar_at(&sliced, 0).unwrap()).unwrap(),
             100
@@ -319,7 +333,7 @@ mod test {
 
     #[test]
     pub fn scalar_at_sliced_twice() {
-        let sliced_once = slice(&sparse_array(nullable_fill()), 1, 8).unwrap();
+        let sliced_once = slice(sparse_array(nullable_fill()), 1, 8).unwrap();
         assert_eq!(
             usize::try_from(&scalar_at(&sliced_once, 1).unwrap()).unwrap(),
             100
@@ -358,5 +372,34 @@ mod test {
             validity.boolean_buffer().iter().collect_vec(),
             [false, false, true, false, false, true, false, false, true, false]
         );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_invalid_length() {
+        let values = vec![15_u32, 135, 13531, 42].into_array();
+        let indices = vec![10_u64, 11, 50, 100].into_array();
+
+        SparseArray::try_new(
+            indices.clone(),
+            values,
+            100,
+            Scalar::primitive(0_u32, Nullability::NonNullable),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_valid_length() {
+        let values = vec![15_u32, 135, 13531, 42].into_array();
+        let indices = vec![10_u64, 11, 50, 100].into_array();
+
+        SparseArray::try_new(
+            indices.clone(),
+            values,
+            101,
+            Scalar::primitive(0_u32, Nullability::NonNullable),
+        )
+        .unwrap();
     }
 }

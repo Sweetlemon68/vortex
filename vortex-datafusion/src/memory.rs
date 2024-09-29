@@ -3,20 +3,24 @@ use std::sync::Arc;
 
 use arrow_schema::SchemaRef;
 use async_trait::async_trait;
+use datafusion::catalog::Session;
 use datafusion::datasource::TableProvider;
-use datafusion::execution::context::SessionState;
 use datafusion::prelude::*;
-use datafusion_common::Result as DFResult;
+use datafusion_common::{Result as DFResult, ToDFSchema};
+use datafusion_expr::utils::conjunction;
 use datafusion_expr::{TableProviderFilterPushDown, TableType};
-use datafusion_physical_expr::EquivalenceProperties;
+use datafusion_physical_expr::{create_physical_expr, EquivalenceProperties};
 use datafusion_physical_plan::{ExecutionMode, ExecutionPlan, Partitioning, PlanProperties};
 use itertools::Itertools;
 use vortex::array::ChunkedArray;
 use vortex::{Array, ArrayDType as _};
+use vortex_error::{VortexError, VortexExpect as _};
+use vortex_expr::datafusion::convert_expr_to_vortex;
+use vortex_expr::VortexExpr;
 
 use crate::datatype::infer_schema;
 use crate::plans::{RowSelectorExec, TakeRowsExec};
-use crate::{can_be_pushed_down, get_filter_projection, VortexScanExec};
+use crate::{can_be_pushed_down, VortexScanExec};
 
 /// A [`TableProvider`] that exposes an existing Vortex Array to the DataFusion SQL engine.
 ///
@@ -43,7 +47,8 @@ impl VortexMemTable {
             Ok(a) => a,
             _ => {
                 let dtype = array.dtype().clone();
-                ChunkedArray::try_new(vec![array], dtype).unwrap()
+                ChunkedArray::try_new(vec![array], dtype)
+                    .vortex_expect("Failed to wrap array as a ChunkedArray with 1 chunk")
             }
         };
 
@@ -75,38 +80,33 @@ impl TableProvider for VortexMemTable {
     /// The array is flattened directly into the nearest Arrow-compatible encoding.
     async fn scan(
         &self,
-        state: &SessionState,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         _limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
-        let filter_exprs = if filters.is_empty() {
-            None
-        } else {
-            Some(filters)
-        };
-
         let output_projection: Vec<usize> = match projection {
             None => (0..self.schema_ref.fields().len()).collect(),
             Some(proj) => proj.clone(),
         };
 
-        match filter_exprs {
+        match conjunction(filters.to_vec()) {
             // If there is a filter expression, we execute in two phases, first performing a filter
             // on the input to get back row indices, and then taking the remaining struct columns
             // using the calculated indices from the filter.
-            Some(filter_exprs) => {
-                let filter_projection =
-                    get_filter_projection(filter_exprs, self.schema_ref.clone());
+            Some(expr) => {
+                let df_schema = self.schema_ref.clone().to_dfschema()?;
 
-                Ok(make_filter_then_take_plan(
+                let filter_expr = create_physical_expr(&expr, &df_schema, state.execution_props())?;
+                let filter_expr = convert_expr_to_vortex(filter_expr)?;
+
+                make_filter_then_take_plan(
                     self.schema_ref.clone(),
-                    filter_exprs,
-                    filter_projection,
+                    filter_expr,
                     self.array.clone(),
                     output_projection.clone(),
                     state,
-                ))
+                )
             }
 
             // If no filters were pushed down, we materialize the entire StructArray into a
@@ -115,7 +115,7 @@ impl TableProvider for VortexMemTable {
                 let output_schema = Arc::new(
                     self.schema_ref
                         .project(output_projection.as_slice())
-                        .expect("project output schema"),
+                        .map_err(VortexError::from)?,
                 );
                 let plan_properties = PlanProperties::new(
                     EquivalenceProperties::new(output_schema),
@@ -125,11 +125,11 @@ impl TableProvider for VortexMemTable {
                     ExecutionMode::Bounded,
                 );
 
-                Ok(Arc::new(VortexScanExec {
-                    array: self.array.clone(),
-                    scan_projection: output_projection.clone(),
+                Ok(Arc::new(VortexScanExec::try_new(
+                    self.array.clone(),
+                    output_projection.clone(),
                     plan_properties,
-                }))
+                )?))
             }
         }
     }
@@ -150,7 +150,7 @@ impl TableProvider for VortexMemTable {
         filters
             .iter()
             .map(|expr| {
-                if can_be_pushed_down(expr) {
+                if can_be_pushed_down(expr, self.schema().as_ref()) {
                     Ok(TableProviderFilterPushDown::Exact)
                 } else {
                     Ok(TableProviderFilterPushDown::Unsupported)
@@ -190,30 +190,26 @@ impl VortexMemTableOptions {
 /// columns.
 fn make_filter_then_take_plan(
     schema: SchemaRef,
-    filter_exprs: &[Expr],
-    filter_projection: Vec<usize>,
+    filter_expr: Arc<dyn VortexExpr>,
     chunked_array: ChunkedArray,
     output_projection: Vec<usize>,
-    _session_state: &SessionState,
-) -> Arc<dyn ExecutionPlan> {
-    let row_selector_op = Arc::new(RowSelectorExec::new(
-        filter_exprs,
-        filter_projection,
-        &chunked_array,
-    ));
+    _session_state: &dyn Session,
+) -> DFResult<Arc<dyn ExecutionPlan>> {
+    let row_selector_op = Arc::new(RowSelectorExec::try_new(filter_expr, &chunked_array)?);
 
-    Arc::new(TakeRowsExec::new(
+    Ok(Arc::new(TakeRowsExec::new(
         schema.clone(),
         &output_projection,
         row_selector_op.clone(),
         &chunked_array,
-    ))
+    )))
 }
 
 #[cfg(test)]
 mod test {
     use arrow_array::cast::AsArray as _;
     use arrow_array::types::Int64Type;
+    use arrow_schema::{DataType, Field, Schema};
     use datafusion::functions_aggregate::count::count_distinct;
     use datafusion::prelude::SessionContext;
     use datafusion_common::{Column, TableReference};
@@ -334,21 +330,24 @@ mod test {
         };
         let e = Expr::BinaryExpr(e);
 
-        assert!(can_be_pushed_down(&e));
+        assert!(can_be_pushed_down(
+            &e,
+            &Schema::new(vec![Field::new("o_orderstatus", DataType::Utf8, true)])
+        ));
     }
 
     #[test]
     fn test_can_be_pushed_down1() {
         let e = lit("hello");
 
-        assert!(can_be_pushed_down(&e));
+        assert!(can_be_pushed_down(&e, &Schema::empty()));
     }
 
     #[test]
     fn test_can_be_pushed_down2() {
         let e = lit(3);
 
-        assert!(can_be_pushed_down(&e));
+        assert!(can_be_pushed_down(&e, &Schema::empty()));
     }
 
     #[test]
@@ -360,12 +359,21 @@ mod test {
         };
         let e = Expr::BinaryExpr(e);
 
-        assert!(!can_be_pushed_down(&e));
+        assert!(!can_be_pushed_down(
+            &e,
+            &Schema::new(vec![Field::new("nums", DataType::Int32, true)])
+        ));
     }
 
     #[test]
     fn test_can_be_pushed_down4() {
         let e = and((col("a")).eq(lit(2u64)), col("b").eq(lit(true)));
-        assert!(can_be_pushed_down(&e));
+        assert!(can_be_pushed_down(
+            &e,
+            &Schema::new(vec![
+                Field::new("a", DataType::UInt64, true),
+                Field::new("b", DataType::Boolean, true)
+            ])
+        ));
     }
 }

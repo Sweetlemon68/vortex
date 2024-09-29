@@ -1,18 +1,25 @@
-use vortex_dtype::DType;
+use vortex_dtype::{DType, Nullability};
 use vortex_error::VortexResult;
-use vortex_scalar::Scalar;
 
 use crate::array::chunked::ChunkedArray;
-use crate::compute::unary::{scalar_at, try_cast, CastFn, ScalarAtFn, SubtractScalarFn};
-use crate::compute::{ArrayCompute, SliceFn, TakeFn};
+use crate::compute::unary::{try_cast, CastFn, ScalarAtFn, SubtractScalarFn};
+use crate::compute::{
+    compare, slice, ArrayCompute, CompareFn, FilterFn, Operator, SliceFn, TakeFn,
+};
 use crate::{Array, IntoArray};
 
+mod filter;
+mod scalar_at;
 mod slice;
 mod take;
 
 impl ArrayCompute for ChunkedArray {
     fn cast(&self) -> Option<&dyn CastFn> {
         Some(self)
+    }
+
+    fn compare(&self, other: &Array, operator: Operator) -> Option<VortexResult<Array>> {
+        Some(CompareFn::compare(self, other, operator))
     }
 
     fn scalar_at(&self) -> Option<&dyn ScalarAtFn> {
@@ -30,12 +37,9 @@ impl ArrayCompute for ChunkedArray {
     fn take(&self) -> Option<&dyn TakeFn> {
         Some(self)
     }
-}
 
-impl ScalarAtFn for ChunkedArray {
-    fn scalar_at(&self, index: usize) -> VortexResult<Scalar> {
-        let (chunk_index, chunk_offset) = self.find_chunk_idx(index);
-        scalar_at(&self.chunk(chunk_index).unwrap(), chunk_offset)
+    fn filter(&self) -> Option<&dyn FilterFn> {
+        Some(self)
     }
 }
 
@@ -47,6 +51,23 @@ impl CastFn for ChunkedArray {
         }
 
         Ok(ChunkedArray::try_new(cast_chunks, dtype.clone())?.into_array())
+    }
+}
+
+impl CompareFn for ChunkedArray {
+    fn compare(&self, array: &Array, operator: Operator) -> VortexResult<Array> {
+        let mut idx = 0;
+        let mut compare_chunks = Vec::with_capacity(self.nchunks());
+
+        for chunk in self.chunks() {
+            let sliced = slice(array, idx, idx + chunk.len())?;
+            let cmp_result = compare(&chunk, &sliced, operator)?;
+            compare_chunks.push(cmp_result);
+
+            idx += chunk.len();
+        }
+
+        Ok(ChunkedArray::try_new(compare_chunks, DType::Bool(Nullability::Nullable))?.into_array())
     }
 }
 

@@ -2,14 +2,13 @@ use std::cmp::min;
 
 use fastlanes::BitPacking;
 use itertools::Itertools;
-use vortex::array::{ConstantArray, PrimitiveArray, SparseArray};
+use vortex::array::{PrimitiveArray, SparseArray};
 use vortex::compute::{slice, take, TakeFn};
 use vortex::{Array, ArrayDType, IntoArray, IntoArrayVariant};
 use vortex_dtype::{
     match_each_integer_ptype, match_each_unsigned_integer_ptype, NativePType, PType,
 };
 use vortex_error::VortexResult;
-use vortex_scalar::Scalar;
 
 use crate::{unpack_single_primitive, BitPackedArray};
 
@@ -18,16 +17,6 @@ impl TakeFn for BitPackedArray {
         let ptype: PType = self.dtype().try_into()?;
         let validity = self.validity();
         let taken_validity = validity.take(indices)?;
-        if self.bit_width() == 0 {
-            return if let Some(patches) = self.patches() {
-                take(&patches, indices)
-            } else {
-                Ok(
-                    ConstantArray::new(Scalar::null(self.dtype().as_nullable()), indices.len())
-                        .into_array(),
-                )
-            };
-        }
 
         let indices = indices.clone().into_primitive()?;
         let taken = match_each_unsigned_integer_ptype!(ptype, |$T| {
@@ -46,16 +35,16 @@ fn take_primitive<T: NativePType + BitPacking>(
         indices
             .maybe_null_slice::<$P>()
             .iter()
-            .chunk_by(|idx| (**idx / 1024) as usize)
+            .map(|i| *i as usize + array.offset())
+            .chunk_by(|idx| idx / 1024)
             .into_iter()
-            .map(|(k, g)| (k, g.map(|idx| (*idx % 1024) as u16).collect()))
+            .map(|(k, g)| (k, g.map(|idx| (idx % 1024) as u16).collect()))
             .collect()
     });
 
     let bit_width = array.bit_width();
 
-    let packed = array.packed().into_primitive()?;
-    let packed = packed.maybe_null_slice::<T>();
+    let packed = array.packed_slice::<T>();
 
     let patches = array.patches().map(SparseArray::try_from).transpose()?;
 
@@ -86,18 +75,23 @@ fn take_primitive<T: NativePType + BitPacking>(
         } else {
             for index in &offsets {
                 output.push(unsafe {
-                    unpack_single_primitive::<T>(packed_chunk, bit_width, *index as usize)?
+                    unpack_single_primitive::<T>(packed_chunk, bit_width, *index as usize)
                 });
             }
         }
 
         if !prefer_bulk_patch {
             if let Some(ref patches) = patches {
-                let patches_slice = slice(
-                    patches.array(),
-                    chunk * 1024,
-                    min((chunk + 1) * 1024, patches.len()),
-                )?;
+                // NOTE: we need to subtract the array offset before slicing into the patches.
+                // This is because BitPackedArray is rounded to block boundaries, but patches
+                // is sliced exactly.
+                let patches_start = if chunk == 0 {
+                    0
+                } else {
+                    (chunk * 1024) - array.offset()
+                };
+                let patches_end = min((chunk + 1) * 1024 - array.offset(), patches.len());
+                let patches_slice = slice(patches.as_ref(), patches_start, patches_end)?;
                 let patches_slice = SparseArray::try_from(patches_slice)?;
                 let offsets = PrimitiveArray::from(offsets);
                 do_patch_for_take_primitive(&patches_slice, &offsets, &mut output)?;
@@ -119,7 +113,7 @@ fn do_patch_for_take_primitive<T: NativePType>(
     indices: &PrimitiveArray,
     output: &mut [T],
 ) -> VortexResult<()> {
-    let taken_patches = take(patches.array(), indices.array())?;
+    let taken_patches = take(patches.as_ref(), indices.as_ref())?;
     let taken_patches = SparseArray::try_from(taken_patches)?;
 
     let base_index = output.len() - indices.len();
@@ -144,10 +138,10 @@ mod test {
     use itertools::Itertools;
     use rand::distributions::Uniform;
     use rand::{thread_rng, Rng};
-    use vortex::array::{Primitive, PrimitiveArray, SparseArray};
-    use vortex::compute::take;
+    use vortex::array::{PrimitiveArray, SparseArray};
     use vortex::compute::unary::scalar_at;
-    use vortex::{ArrayDef, IntoArray, IntoArrayVariant};
+    use vortex::compute::{slice, take};
+    use vortex::{IntoArray, IntoArrayVariant};
 
     use crate::BitPackedArray;
 
@@ -157,15 +151,28 @@ mod test {
 
         // Create a u8 array modulo 63.
         let unpacked = PrimitiveArray::from((0..4096).map(|i| (i % 63) as u8).collect::<Vec<_>>());
+        let bitpacked = BitPackedArray::encode(unpacked.as_ref(), 6).unwrap();
 
-        let bitpacked = BitPackedArray::encode(unpacked.array(), 6).unwrap();
-
-        let result = take(bitpacked.array(), &indices).unwrap();
-        assert_eq!(result.encoding().id(), Primitive::ID);
-
-        let primitive_result = result.into_primitive().unwrap();
+        let primitive_result = take(bitpacked.as_ref(), &indices)
+            .unwrap()
+            .into_primitive()
+            .unwrap();
         let res_bytes = primitive_result.maybe_null_slice::<u8>();
         assert_eq!(res_bytes, &[0, 62, 31, 33, 9, 18]);
+    }
+
+    #[test]
+    fn take_sliced_indices() {
+        let indices = PrimitiveArray::from(vec![1919, 1921]).into_array();
+
+        // Create a u8 array modulo 63.
+        let unpacked = PrimitiveArray::from((0..4096).map(|i| (i % 63) as u8).collect::<Vec<_>>());
+        let bitpacked = BitPackedArray::encode(unpacked.as_ref(), 6).unwrap();
+        let sliced = slice(bitpacked.as_ref(), 128, 2050).unwrap();
+
+        let primitive_result = take(&sliced, &indices).unwrap().into_primitive().unwrap();
+        let res_bytes = primitive_result.maybe_null_slice::<u8>();
+        assert_eq!(res_bytes, &[31, 33]);
     }
 
     #[test]
@@ -174,7 +181,7 @@ mod test {
         let num_patches: usize = 128;
         let values = (0..u16::MAX as u32 + num_patches as u32).collect::<Vec<_>>();
         let uncompressed = PrimitiveArray::from(values.clone());
-        let packed = BitPackedArray::encode(uncompressed.array(), 16).unwrap();
+        let packed = BitPackedArray::encode(uncompressed.as_ref(), 16).unwrap();
         assert!(packed.patches().is_some());
 
         let patches = SparseArray::try_from(packed.patches().unwrap()).unwrap();
@@ -191,7 +198,7 @@ mod test {
             .map(|i| i as u32)
             .collect_vec()
             .into();
-        let taken = take(packed.array(), random_indices.array()).unwrap();
+        let taken = take(packed.as_ref(), random_indices.as_ref()).unwrap();
 
         // sanity check
         random_indices
@@ -200,7 +207,7 @@ mod test {
             .enumerate()
             .for_each(|(ti, i)| {
                 assert_eq!(
-                    u32::try_from(scalar_at(packed.array(), *i as usize).unwrap().as_ref())
+                    u32::try_from(scalar_at(packed.as_ref(), *i as usize).unwrap().as_ref())
                         .unwrap(),
                     values[*i as usize]
                 );
@@ -223,7 +230,7 @@ mod test {
 
         values.iter().enumerate().for_each(|(i, v)| {
             assert_eq!(
-                u32::try_from(scalar_at(packed.array(), i).unwrap().as_ref()).unwrap(),
+                u32::try_from(scalar_at(packed.as_ref(), i).unwrap().as_ref()).unwrap(),
                 *v
             );
         });

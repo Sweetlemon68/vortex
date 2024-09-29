@@ -1,7 +1,8 @@
 use itertools::Itertools;
 use num_traits::{PrimInt, WrappingAdd, WrappingSub};
-use vortex::array::{ConstantArray, PrimitiveArray};
+use vortex::array::{ConstantArray, PrimitiveArray, SparseArray};
 use vortex::stats::{trailing_zeros, ArrayStatistics, Stat};
+use vortex::validity::LogicalValidity;
 use vortex::{Array, ArrayDType, IntoArray, IntoArrayVariant};
 use vortex_dtype::{match_each_integer_ptype, NativePType};
 use vortex_error::{vortex_err, VortexResult};
@@ -9,8 +10,8 @@ use vortex_scalar::Scalar;
 
 use crate::FoRArray;
 
-pub fn for_compress(array: &PrimitiveArray) -> VortexResult<(Array, Scalar, u8)> {
-    let shift = trailing_zeros(array.array());
+pub fn for_compress(array: &PrimitiveArray) -> VortexResult<Array> {
+    let shift = trailing_zeros(array.as_ref());
     let min = array
         .statistics()
         .compute(Stat::Min)
@@ -18,16 +19,42 @@ pub fn for_compress(array: &PrimitiveArray) -> VortexResult<(Array, Scalar, u8)>
 
     Ok(match_each_integer_ptype!(array.ptype(), |$T| {
         if shift == <$T>::PTYPE.bit_width() as u8 {
-            (ConstantArray::new(
-                Scalar::zero::<$T>(array.dtype().nullability())
-                    .reinterpret_cast(array.ptype().to_unsigned()),
-                array.len(),
-            )
-            .into_array(), min, shift)
+            match array.validity().to_logical(array.len()) {
+                LogicalValidity::AllValid(l) => {
+                    ConstantArray::new(Scalar::zero::<$T>(array.dtype().nullability()), l).into_array()
+                },
+                LogicalValidity::AllInvalid(l) => {
+                    ConstantArray::new(Scalar::null(array.dtype().clone()), l).into_array()
+                }
+                LogicalValidity::Array(a) => {
+                    let valid_indices = PrimitiveArray::from(
+                        a.into_bool()?
+                            .boolean_buffer()
+                            .set_indices()
+                            .map(|i| i as u64)
+                            .collect::<Vec<_>>(),
+                    )
+                    .into_array();
+                    let valid_len = valid_indices.len();
+                    SparseArray::try_new(
+                        valid_indices,
+                        ConstantArray::new(Scalar::zero::<$T>(array.dtype().nullability()), valid_len)
+                            .into_array(),
+                        array.len(),
+                        Scalar::null(array.dtype().clone()),
+                    )?
+                    .into_array()
+                }
+            }
         } else {
-            (compress_primitive::<$T>(&array, shift, $T::try_from(&min)?)
-                .reinterpret_cast(array.ptype().to_unsigned())
-                .into_array(), min, shift)
+            FoRArray::try_new(
+                compress_primitive::<$T>(&array, shift, $T::try_from(&min)?)
+                    .reinterpret_cast(array.ptype().to_unsigned())
+                    .into_array(),
+                min,
+                shift,
+            )?
+            .into_array()
         }
     }))
 }
@@ -39,12 +66,11 @@ fn compress_primitive<T: NativePType + WrappingSub + PrimInt>(
 ) -> PrimitiveArray {
     assert!(shift < T::PTYPE.bit_width() as u8);
     let values = if shift > 0 {
-        let shifted_min = min >> shift as usize;
         parray
             .maybe_null_slice::<T>()
             .iter()
-            .map(|&v| v >> shift as usize)
-            .map(|v| v.wrapping_sub(&shifted_min))
+            .map(|&v| v.wrapping_sub(&min))
+            .map(|v| v >> shift as usize)
             .collect_vec()
     } else {
         parray
@@ -58,34 +84,34 @@ fn compress_primitive<T: NativePType + WrappingSub + PrimInt>(
 }
 
 pub fn decompress(array: FoRArray) -> VortexResult<PrimitiveArray> {
-    let shift = array.shift();
+    let shift = array.shift() as usize;
     let ptype = array.ptype();
     let encoded = array.encoded().into_primitive()?.reinterpret_cast(ptype);
+    let validity = encoded.validity();
     Ok(match_each_integer_ptype!(ptype, |$T| {
-        let reference: $T = array.reference().try_into()?;
+        let min: $T = array.reference().try_into()?;
         PrimitiveArray::from_vec(
-            decompress_primitive(encoded.maybe_null_slice::<$T>(), reference, shift),
-            encoded.validity(),
+            decompress_primitive(encoded.into_maybe_null_slice::<$T>(), min, shift),
+            validity,
         )
     }))
 }
 
 fn decompress_primitive<T: NativePType + WrappingAdd + PrimInt>(
-    values: &[T],
-    reference: T,
-    shift: u8,
+    values: Vec<T>,
+    min: T,
+    shift: usize,
 ) -> Vec<T> {
     if shift > 0 {
-        let shifted_reference = reference << shift as usize;
         values
-            .iter()
-            .map(|&v| v << shift as usize)
-            .map(|v| v.wrapping_add(&shifted_reference))
+            .into_iter()
+            .map(|v| v << shift)
+            .map(|v| v.wrapping_add(&min))
             .collect_vec()
     } else {
         values
-            .iter()
-            .map(|&v| v.wrapping_add(&reference))
+            .into_iter()
+            .map(|v| v.wrapping_add(&min))
             .collect_vec()
     }
 }
@@ -101,20 +127,24 @@ mod test {
     fn test_compress() {
         // Create a range offset by a million
         let array = PrimitiveArray::from((0u32..10_000).map(|v| v + 1_000_000).collect_vec());
+        let compressed = FoRArray::try_from(for_compress(&array).unwrap()).unwrap();
 
-        let (_, reference, _) = for_compress(&array).unwrap();
-        assert_eq!(u32::try_from(reference).unwrap(), 1_000_000u32);
+        assert_eq!(u32::try_from(compressed.reference()).unwrap(), 1_000_000u32);
     }
 
     #[test]
     fn test_decompress() {
         // Create a range offset by a million
-        let array = PrimitiveArray::from((0u32..10_000).map(|v| v + 1_000_000).collect_vec());
-        let (compressed, reference, shift) = for_compress(&array).unwrap();
-        let decompressed = FoRArray::try_new(compressed, reference, shift)
-            .unwrap()
-            .into_primitive()
-            .unwrap();
+        let array = PrimitiveArray::from(
+            (0u32..100_000)
+                .step_by(1024)
+                .map(|v| v + 1_000_000)
+                .collect_vec(),
+        );
+        let compressed = for_compress(&array).unwrap();
+        let for_arr = FoRArray::try_from(compressed.clone()).unwrap();
+        assert!(for_arr.shift() > 0);
+        let decompressed = compressed.into_primitive().unwrap();
         assert_eq!(
             decompressed.maybe_null_slice::<u32>(),
             array.maybe_null_slice::<u32>()
@@ -124,8 +154,7 @@ mod test {
     #[test]
     fn test_overflow() {
         let array = PrimitiveArray::from((i8::MIN..=i8::MAX).collect_vec());
-        let (compressed, reference, shift) = for_compress(&array).unwrap();
-        let compressed = FoRArray::try_new(compressed, reference, shift).unwrap();
+        let compressed = FoRArray::try_from(for_compress(&array).unwrap()).unwrap();
         assert_eq!(i8::MIN, i8::try_from(compressed.reference()).unwrap());
 
         let encoded = compressed.encoded().into_primitive().unwrap();
@@ -133,7 +162,7 @@ mod test {
         let unsigned: Vec<u8> = (0..=u8::MAX).collect_vec();
         assert_eq!(encoded_bytes, unsigned.as_slice());
 
-        let decompressed = compressed.array().clone().into_primitive().unwrap();
+        let decompressed = compressed.as_ref().clone().into_primitive().unwrap();
         assert_eq!(
             decompressed.maybe_null_slice::<i8>(),
             array.maybe_null_slice::<i8>()

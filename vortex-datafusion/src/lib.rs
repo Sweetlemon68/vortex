@@ -3,36 +3,36 @@
 #![allow(clippy::nonminimal_bool)]
 
 use std::any::Any;
-use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use arrow_array::RecordBatch;
-use arrow_schema::{DataType, SchemaRef};
+use arrow_schema::{DataType, Schema, SchemaRef};
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::prelude::{DataFrame, SessionContext};
-use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion_common::{exec_datafusion_err, DataFusionError, Result as DFResult};
+use datafusion_common::{exec_datafusion_err, DataFusionError, Result as DFResult, Statistics};
 use datafusion_execution::object_store::ObjectStoreUrl;
 use datafusion_expr::{Expr, Operator};
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::Stream;
-use itertools::Itertools;
 use memory::{VortexMemTable, VortexMemTableOptions};
 use persistent::config::VortexTableOptions;
 use persistent::provider::VortexFileTableProvider;
 use vortex::array::ChunkedArray;
 use vortex::{Array, ArrayDType, IntoArrayVariant};
+use vortex_dtype::field::Field;
+use vortex_error::{vortex_err, VortexResult};
+
+use crate::statistics::chunked_array_df_stats;
 
 pub mod memory;
 pub mod persistent;
 
 mod datatype;
-mod eval;
-mod expr;
 mod plans;
+mod statistics;
 
 const SUPPORTED_BINARY_OPS: &[Operator] = &[
     Operator::Eq,
@@ -45,7 +45,6 @@ const SUPPORTED_BINARY_OPS: &[Operator] = &[
 
 fn supported_data_types(dt: DataType) -> bool {
     dt.is_integer()
-        || dt.is_signed_integer()
         || dt.is_floating()
         || dt.is_null()
         || dt == DataType::Boolean
@@ -54,6 +53,12 @@ fn supported_data_types(dt: DataType) -> bool {
         || dt == DataType::Binary
         || dt == DataType::BinaryView
         || dt == DataType::Utf8View
+        || dt == DataType::Date32
+        || dt == DataType::Date64
+        || matches!(
+            dt,
+            DataType::Timestamp(_, _) | DataType::Time32(_) | DataType::Time64(_)
+        )
 }
 
 pub trait SessionContextExt {
@@ -99,10 +104,13 @@ impl SessionContextExt for SessionContext {
         array: Array,
         options: VortexMemTableOptions,
     ) -> DFResult<()> {
-        assert!(
-            array.dtype().is_struct(),
-            "Vortex arrays must have struct type"
-        );
+        if !array.dtype().is_struct() {
+            return Err(vortex_err!(
+                "Vortex arrays must have struct type, found {}",
+                array.dtype()
+            )
+            .into());
+        }
 
         let vortex_table = VortexMemTable::new(array, options);
         self.register_table(name.as_ref(), Arc::new(vortex_table))
@@ -114,10 +122,13 @@ impl SessionContextExt for SessionContext {
         array: Array,
         options: VortexMemTableOptions,
     ) -> DFResult<DataFrame> {
-        assert!(
-            array.dtype().is_struct(),
-            "Vortex arrays must have struct type"
-        );
+        if !array.dtype().is_struct() {
+            return Err(vortex_err!(
+                "Vortex arrays must have struct type, found {}",
+                array.dtype()
+            )
+            .into());
+        }
 
         let vortex_table = VortexMemTable::new(array, options);
 
@@ -146,47 +157,21 @@ impl SessionContextExt for SessionContext {
     }
 }
 
-fn can_be_pushed_down(expr: &Expr) -> bool {
+fn can_be_pushed_down(expr: &Expr, schema: &Schema) -> bool {
     match expr {
         Expr::BinaryExpr(expr)
             if expr.op.is_logic_operator() || SUPPORTED_BINARY_OPS.contains(&expr.op) =>
         {
-            can_be_pushed_down(expr.left.as_ref()) & can_be_pushed_down(expr.right.as_ref())
+            can_be_pushed_down(expr.left.as_ref(), schema)
+                & can_be_pushed_down(expr.right.as_ref(), schema)
         }
-        Expr::Column(_) => true,
+        Expr::Column(col) => match schema.column_with_name(col.name()) {
+            Some((_, field)) => supported_data_types(field.data_type().clone()),
+            _ => false,
+        },
         Expr::Literal(lit) => supported_data_types(lit.data_type()),
         _ => false,
     }
-}
-
-fn get_filter_projection(exprs: &[Expr], schema: SchemaRef) -> Vec<usize> {
-    let referenced_columns: HashSet<String> =
-        exprs.iter().flat_map(get_column_references).collect();
-
-    let projection: Vec<usize> = referenced_columns
-        .iter()
-        .map(|col_name| schema.column_with_name(col_name).unwrap().0)
-        .sorted()
-        .collect();
-
-    projection
-}
-
-/// Extract out the columns from our table referenced by the expression.
-fn get_column_references(expr: &Expr) -> HashSet<String> {
-    let mut references = HashSet::new();
-
-    expr.apply(|node| match node {
-        Expr::Column(col) => {
-            references.insert(col.name.clone());
-
-            Ok(TreeNodeRecursion::Continue)
-        }
-        _ => Ok(TreeNodeRecursion::Continue),
-    })
-    .unwrap();
-
-    references
 }
 
 /// Physical plan node for scans against an in-memory, possibly chunked Vortex Array.
@@ -195,6 +180,23 @@ struct VortexScanExec {
     array: ChunkedArray,
     scan_projection: Vec<usize>,
     plan_properties: PlanProperties,
+    statistics: Statistics,
+}
+
+impl VortexScanExec {
+    pub fn try_new(
+        array: ChunkedArray,
+        scan_projection: Vec<usize>,
+        plan_properties: PlanProperties,
+    ) -> VortexResult<Self> {
+        let statistics = chunked_array_df_stats(&array, &scan_projection)?;
+        Ok(Self {
+            array,
+            scan_projection,
+            plan_properties,
+            statistics,
+        })
+    }
 }
 
 impl Debug for VortexScanExec {
@@ -210,7 +212,7 @@ impl Debug for VortexScanExec {
 
 impl DisplayAs for VortexScanExec {
     fn fmt_as(&self, _display_type: DisplayFormatType, f: &mut Formatter) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        Debug::fmt(self, f)
     }
 }
 
@@ -221,38 +223,32 @@ pub(crate) struct VortexRecordBatchStream {
     num_chunks: usize,
     chunks: ChunkedArray,
 
-    projection: Vec<usize>,
+    projection: Vec<Field>,
 }
 
 impl Stream for VortexRecordBatchStream {
     type Item = DFResult<RecordBatch>;
 
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        if this.idx >= this.num_chunks {
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.idx >= self.num_chunks {
             return Poll::Ready(None);
         }
 
         // Grab next chunk, project and convert to Arrow.
-        let chunk = this
-            .chunks
-            .chunk(this.idx)
-            .expect("nchunks should match precomputed");
-        this.idx += 1;
+        let chunk = self.chunks.chunk(self.idx)?;
+        self.idx += 1;
 
         let struct_array = chunk
-            .clone()
             .into_struct()
             .map_err(|vortex_error| DataFusionError::Execution(format!("{}", vortex_error)))?;
 
-        let projected_struct =
-            struct_array
-                .project(this.projection.as_slice())
-                .map_err(|vortex_err| {
-                    exec_datafusion_err!("projection pushdown to Vortex failed: {vortex_err}")
-                })?;
+        let projected_struct = struct_array
+            .project(&self.projection)
+            .map_err(|vortex_err| {
+                exec_datafusion_err!("projection pushdown to Vortex failed: {vortex_err}")
+            })?;
 
-        Poll::Ready(Some(Ok(projected_struct.into())))
+        Poll::Ready(Some(Ok(projected_struct.try_into()?)))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -302,7 +298,16 @@ impl ExecutionPlan for VortexScanExec {
             idx: 0,
             num_chunks: self.array.nchunks(),
             chunks: self.array.clone(),
-            projection: self.scan_projection.clone(),
+            projection: self
+                .scan_projection
+                .iter()
+                .copied()
+                .map(Field::from)
+                .collect(),
         }))
+    }
+
+    fn statistics(&self) -> DFResult<Statistics> {
+        Ok(self.statistics.clone())
     }
 }

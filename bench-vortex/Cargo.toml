@@ -11,9 +11,15 @@ keywords = { workspace = true }
 include = { workspace = true }
 edition = { workspace = true }
 rust-version = { workspace = true }
+readme = "README.md"
 
-[lints]
-workspace = true
+[lints.rust]
+warnings = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+or_fun_call = "deny"
 
 [dependencies]
 anyhow = { workspace = true }
@@ -22,8 +28,8 @@ arrow-schema = { workspace = true }
 arrow-select = { workspace = true }
 bytes = { workspace = true }
 bzip2 = { workspace = true }
-csv = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
+csv = { workspace = true }
 datafusion = { workspace = true }
 enum-iterator = { workspace = true }
 flexbuffers = { workspace = true }
@@ -42,6 +48,7 @@ rand = { workspace = true }
 rayon = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 simplelog = { workspace = true }
 tar = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
@@ -75,17 +82,26 @@ test = false
 bench = false
 
 [[bench]]
-name = "compress_benchmark"
+name = "compress_noci"
+test = false
 harness = false
 
 [[bench]]
 name = "random_access"
+test = false
 harness = false
 
 [[bench]]
-name = "datafusion_benchmark"
+name = "datafusion"
+test = false
 harness = false
 
 [[bench]]
-name = "tpch_benchmark"
+name = "tpch"
+test = false
+harness = false
+
+[[bench]]
+name = "bytes_at"
+test = false
 harness = false

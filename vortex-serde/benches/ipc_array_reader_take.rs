@@ -1,8 +1,11 @@
+#![allow(clippy::unwrap_used)]
 use std::sync::Arc;
+use std::time::Duration;
 
 use criterion::async_executor::FuturesExecutor;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use futures_executor::block_on;
+use futures_util::io::Cursor;
 use futures_util::{pin_mut, TryStreamExt};
 use itertools::Itertools;
 use vortex::array::{ChunkedArray, PrimitiveArray};
@@ -10,8 +13,8 @@ use vortex::stream::ArrayStreamExt;
 use vortex::validity::Validity;
 use vortex::{Context, IntoArray};
 use vortex_serde::io::FuturesAdapter;
-use vortex_serde::writer::ArrayWriter;
-use vortex_serde::MessageReader;
+use vortex_serde::stream_reader::StreamArrayReader;
+use vortex_serde::stream_writer::StreamArrayWriter;
 
 // 100 record batches, 100k rows each
 // take from the first 20 batches and last batch
@@ -33,21 +36,22 @@ fn ipc_array_reader_take(c: &mut Criterion) {
         )
         .into_array();
 
-        let buffer = block_on(async { ArrayWriter::new(vec![]).write_array(array).await })
+        let buffer = block_on(async { StreamArrayWriter::new(vec![]).write_array(array).await })
             .unwrap()
             .into_inner();
 
         let indices = indices.clone().into_array();
 
         b.to_async(FuturesExecutor).iter(|| async {
-            let mut cursor = futures_util::io::Cursor::new(&buffer);
-            let mut msgs = MessageReader::try_new(FuturesAdapter(&mut cursor))
-                .await
-                .unwrap();
-            let stream = msgs
-                .array_stream_from_messages(ctx.clone())
-                .await
-                .unwrap()
+            let stream_reader =
+                StreamArrayReader::try_new(FuturesAdapter(Cursor::new(&buffer)), ctx.clone())
+                    .await
+                    .unwrap()
+                    .load_dtype()
+                    .await
+                    .unwrap();
+            let stream = stream_reader
+                .into_array_stream()
                 .take_rows(indices.clone())
                 .unwrap();
             pin_mut!(stream);
@@ -59,5 +63,9 @@ fn ipc_array_reader_take(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, ipc_array_reader_take);
+criterion_group!(
+    name = benches;
+    config = Criterion::default().measurement_time(Duration::from_secs(10));
+    targets = ipc_array_reader_take
+);
 criterion_main!(benches);

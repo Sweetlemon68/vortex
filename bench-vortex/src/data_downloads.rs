@@ -14,8 +14,7 @@ use vortex::arrow::FromArrowType;
 use vortex::{Array, IntoArray};
 use vortex_dtype::DType;
 use vortex_error::{VortexError, VortexResult};
-use vortex_serde::io::TokioAdapter;
-use vortex_serde::writer::ArrayWriter;
+use vortex_serde::stream_writer::StreamArrayWriter;
 
 use crate::idempotent;
 use crate::reader::BATCH_SIZE;
@@ -46,7 +45,7 @@ pub fn data_vortex_uncompressed(fname_out: &str, downloaded_data: PathBuf) -> Pa
         let array = ChunkedArray::try_new(
             reader
                 .into_iter()
-                .map(|batch_result| Array::from(batch_result.unwrap()))
+                .map(|batch_result| Array::try_from(batch_result.unwrap()).unwrap())
                 .collect(),
             dtype,
         )
@@ -57,7 +56,7 @@ pub fn data_vortex_uncompressed(fname_out: &str, downloaded_data: PathBuf) -> Pa
             .unwrap()
             .block_on(async move {
                 let write = tokio::fs::File::create(path).await.unwrap();
-                ArrayWriter::new(TokioAdapter(write))
+                StreamArrayWriter::new(write)
                     .write_array(array)
                     .await
                     .unwrap();
@@ -92,6 +91,7 @@ pub fn decompress_bz2(input_path: PathBuf, output_path: PathBuf) -> PathBuf {
 
 pub trait BenchmarkDataset {
     fn as_uncompressed(&self);
+    fn to_vortex_array(&self) -> VortexResult<Array>;
     fn compress_to_vortex(&self) -> VortexResult<()>;
     fn write_as_parquet(&self);
     fn write_as_vortex(&self) -> impl Future<Output = ()>;

@@ -1,0 +1,40 @@
+[package]
+name = "vortex-fuzz"
+publish = false
+description = "Fuzzer for vortex arrays"
+version = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+keywords = { workspace = true }
+include = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+readme = "README.md"
+
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arrow-buffer = { workspace = true }
+libfuzzer-sys = { workspace = true }
+num-traits = { workspace = true }
+vortex-array = { workspace = true, features = ["arbitrary"] }
+vortex-buffer = { workspace = true }
+vortex-dtype = { workspace = true, features = ["arbitrary"] }
+vortex-error = { workspace = true }
+vortex-sampling-compressor = { workspace = true, features = ["arbitrary"] }
+vortex-scalar = { workspace = true, features = ["arbitrary"] }
+
+[lib]
+name = "vortex_fuzz"
+path = "src/lib.rs"
+
+[[bin]]
+name = "array_ops"
+path = "fuzz_targets/array_ops.rs"
+test = false
+doc = false
+bench = false

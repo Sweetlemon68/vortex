@@ -10,17 +10,23 @@ keywords = { workspace = true }
 include = { workspace = true }
 edition = { workspace = true }
 rust-version = { workspace = true }
+readme = { workspace = true }
 
 [dependencies]
+arbitrary = { workspace = true, optional = true }
+fsst-rs = { workspace = true }
+lazy_static = { workspace = true }
 log = { workspace = true }
 rand = { workspace = true }
 vortex-alp = { workspace = true }
 vortex-array = { workspace = true }
+vortex-datetime-dtype = { workspace = true }
 vortex-datetime-parts = { workspace = true }
 vortex-dict = { workspace = true }
 vortex-dtype = { workspace = true }
 vortex-error = { workspace = true }
 vortex-fastlanes = { workspace = true }
+vortex-fsst = { workspace = true }
 vortex-roaring = { workspace = true }
 vortex-runend = { workspace = true }
 vortex-zigzag = { workspace = true }
@@ -30,3 +36,6 @@ chrono = { workspace = true }
 
 [lints]
 workspace = true
+
+[features]
+arbitrary = ["dep:arbitrary"]

@@ -1,16 +1,20 @@
 use serde::{Deserialize, Serialize};
-use vortex_dtype::{DType, FieldName, FieldNames, Nullability, StructDType};
-use vortex_error::{vortex_bail, vortex_err, VortexResult};
+use vortex_dtype::field::Field;
+use vortex_dtype::{DType, FieldName, FieldNames, StructDType};
+use vortex_error::{vortex_bail, vortex_err, vortex_panic, VortexExpect as _, VortexResult};
 
+use crate::encoding::ids;
 use crate::stats::{ArrayStatisticsCompute, StatsSet};
 use crate::validity::{ArrayValidity, LogicalValidity, Validity, ValidityMetadata};
 use crate::variants::{ArrayVariants, StructArrayTrait};
 use crate::visitor::{AcceptArrayVisitor, ArrayVisitor};
-use crate::{impl_encoding, Array, ArrayDType, ArrayDef, ArrayTrait, Canonical, IntoCanonical};
+use crate::{
+    impl_encoding, Array, ArrayDType, ArrayDef, ArrayTrait, Canonical, IntoArray, IntoCanonical,
+};
 
 mod compute;
 
-impl_encoding!("vortex.struct", 8u16, Struct);
+impl_encoding!("vortex.struct", ids::STRUCT, Struct);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StructMetadata {
@@ -20,15 +24,19 @@ pub struct StructMetadata {
 
 impl StructArray {
     pub fn validity(&self) -> Validity {
-        self.metadata().validity.to_validity(self.array().child(
-            self.nfields(),
-            &Validity::DTYPE,
-            self.len(),
-        ))
+        self.metadata().validity.to_validity(|| {
+            self.as_ref()
+                .child(self.nfields(), &Validity::DTYPE, self.len())
+                .vortex_expect("StructArray: validity child")
+        })
     }
 
     pub fn children(&self) -> impl Iterator<Item = Array> + '_ {
-        (0..self.nfields()).map(move |idx| self.field(idx).unwrap())
+        (0..self.nfields()).map(move |idx| {
+            self.field(idx).unwrap_or_else(|| {
+                vortex_panic!("Field {} not found, nfields: {}", idx, self.nfields())
+            })
+        })
     }
 
     pub fn try_new(
@@ -37,12 +45,19 @@ impl StructArray {
         length: usize,
         validity: Validity,
     ) -> VortexResult<Self> {
+        let nullability = validity.nullability();
+
         if names.len() != fields.len() {
             vortex_bail!("Got {} names and {} fields", names.len(), fields.len());
         }
 
-        if fields.iter().any(|a| a.len() != length) {
-            vortex_bail!("Expected all struct fields to have length {}", length);
+        for field in fields.iter() {
+            if field.len() != length {
+                vortex_bail!(
+                    "Expected all struct fields to have length {length}, found {}",
+                    field.len()
+                );
+            }
         }
 
         let field_dtypes: Vec<_> = fields.iter().map(|d| d.dtype()).cloned().collect();
@@ -56,10 +71,7 @@ impl StructArray {
         }
 
         Self::try_from_parts(
-            DType::Struct(
-                StructDType::new(names, field_dtypes),
-                Nullability::NonNullable,
-            ),
+            DType::Struct(StructDType::new(names, field_dtypes), nullability),
             length,
             StructMetadata {
                 length,
@@ -76,10 +88,10 @@ impl StructArray {
             .map(|(name, _)| FieldName::from(name.as_ref()))
             .collect();
         let fields: Vec<Array> = items.iter().map(|(_, array)| array.clone()).collect();
-        let len = fields.first().unwrap().len();
+        let len = fields.first().map(|f| f.len()).unwrap_or(0);
 
         Self::try_new(FieldNames::from(names), fields, len, Validity::NonNullable)
-            .expect("building StructArray with helper")
+            .vortex_expect("Unexpected error while building StructArray from fields")
     }
 
     // TODO(aduffy): Add equivalent function to support field masks for nested column access.
@@ -89,20 +101,26 @@ impl StructArray {
     /// which specifies the new ordering of columns in the struct. The projection can be used to
     /// perform column re-ordering, deletion, or duplication at a logical level, without any data
     /// copying.
-    ///
-    /// # Panics
-    /// This function will panic an error if the projection references columns not within the
-    /// schema boundaries.
-    pub fn project(&self, projection: &[usize]) -> VortexResult<Self> {
+    #[allow(clippy::same_name_method)]
+    pub fn project(&self, projection: &[Field]) -> VortexResult<Self> {
         let mut children = Vec::with_capacity(projection.len());
         let mut names = Vec::with_capacity(projection.len());
 
-        for &column_idx in projection {
+        for field in projection.iter() {
+            let idx = match field {
+                Field::Name(n) => self
+                    .names()
+                    .iter()
+                    .position(|name| name.as_ref() == n)
+                    .ok_or_else(|| vortex_err!("Unknown field {n}"))?,
+                Field::Index(i) => *i,
+            };
+
+            names.push(self.names()[idx].clone());
             children.push(
-                self.field(column_idx)
-                    .ok_or(vortex_err!(OutOfBounds: column_idx, 0, self.dtypes().len()))?,
+                self.field(idx)
+                    .ok_or_else(|| vortex_err!(OutOfBounds: idx, 0, self.dtypes().len()))?,
             );
-            names.push(self.names()[column_idx].clone());
         }
 
         StructArray::try_new(
@@ -124,9 +142,15 @@ impl ArrayVariants for StructArray {
 
 impl StructArrayTrait for StructArray {
     fn field(&self, idx: usize) -> Option<Array> {
-        self.dtypes()
-            .get(idx)
-            .and_then(|dtype| self.array().child(idx, dtype, self.len()))
+        self.dtypes().get(idx).map(|dtype| {
+            self.as_ref()
+                .child(idx, dtype, self.len())
+                .unwrap_or_else(|e| vortex_panic!(e, "StructArray: field {} not found", idx))
+        })
+    }
+
+    fn project(&self, projection: &[Field]) -> VortexResult<Array> {
+        self.project(projection).map(|a| a.into_array())
     }
 }
 
@@ -150,7 +174,9 @@ impl ArrayValidity for StructArray {
 impl AcceptArrayVisitor for StructArray {
     fn accept(&self, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
         for (idx, name) in self.names().iter().enumerate() {
-            let child = self.field(idx).unwrap();
+            let child = self
+                .field(idx)
+                .ok_or_else(|| vortex_err!(OutOfBounds: idx, 0, self.nfields()))?;
             visitor.visit_child(&format!("\"{}\"", name), &child)?;
         }
         Ok(())
@@ -161,6 +187,7 @@ impl ArrayStatisticsCompute for StructArray {}
 
 #[cfg(test)]
 mod test {
+    use vortex_dtype::field::Field;
     use vortex_dtype::{DType, FieldName, FieldNames, Nullability};
 
     use crate::array::primitive::PrimitiveArray;
@@ -188,7 +215,9 @@ mod test {
         )
         .unwrap();
 
-        let struct_b = struct_a.project(&[2usize, 0]).unwrap();
+        let struct_b = struct_a
+            .project(&[Field::from(2usize), Field::from(0)])
+            .unwrap();
         assert_eq!(
             struct_b.names().as_ref(),
             [FieldName::from("zs"), FieldName::from("xs")],

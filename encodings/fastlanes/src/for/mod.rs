@@ -2,19 +2,20 @@ use std::fmt::Debug;
 
 pub use compress::*;
 use serde::{Deserialize, Serialize};
+use vortex::encoding::ids;
 use vortex::stats::{ArrayStatisticsCompute, StatsSet};
 use vortex::validity::{ArrayValidity, LogicalValidity};
 use vortex::variants::{ArrayVariants, PrimitiveArrayTrait};
 use vortex::visitor::{AcceptArrayVisitor, ArrayVisitor};
 use vortex::{impl_encoding, Array, ArrayDType, ArrayDef, ArrayTrait, Canonical, IntoCanonical};
 use vortex_dtype::{DType, PType};
-use vortex_error::{vortex_bail, VortexResult};
+use vortex_error::{vortex_bail, vortex_panic, VortexExpect as _, VortexResult};
 use vortex_scalar::Scalar;
 
 mod compress;
 mod compute;
 
-impl_encoding!("fastlanes.for", 15u16, FoR);
+impl_encoding!("fastlanes.for", ids::FL_FOR, FoR);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FoRMetadata {
@@ -48,9 +49,9 @@ impl FoRArray {
         } else {
             self.dtype()
         };
-        self.array()
+        self.as_ref()
             .child(0, dtype, self.len())
-            .expect("Missing FoR child")
+            .vortex_expect("FoRArray is missing encoded child array")
     }
 
     #[inline]
@@ -65,7 +66,13 @@ impl FoRArray {
 
     #[inline]
     pub fn ptype(&self) -> PType {
-        self.dtype().try_into().unwrap()
+        self.dtype().try_into().unwrap_or_else(|err| {
+            vortex_panic!(
+                err,
+                "Failed to convert FoRArray DType {} to PType",
+                self.dtype()
+            )
+        })
     }
 }
 

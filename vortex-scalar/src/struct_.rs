@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
+use vortex_dtype::field::Field;
 use vortex_dtype::DType;
-use vortex_error::{vortex_bail, VortexError, VortexResult};
+use vortex_error::{vortex_bail, vortex_err, VortexError, VortexExpect, VortexResult};
 
 use crate::value::ScalarValue;
 use crate::Scalar;
@@ -15,6 +16,10 @@ impl<'a> StructScalar<'a> {
     #[inline]
     pub fn dtype(&self) -> &'a DType {
         self.dtype
+    }
+
+    pub fn is_null(&self) -> bool {
+        self.fields.is_none()
     }
 
     pub fn field_by_idx(&self, idx: usize) -> Option<Scalar> {
@@ -38,8 +43,74 @@ impl<'a> StructScalar<'a> {
         st.find_name(name).and_then(|idx| self.field_by_idx(idx))
     }
 
-    pub fn cast(&self, _dtype: &DType) -> VortexResult<Scalar> {
-        todo!()
+    pub fn fields(&self) -> Option<&[ScalarValue]> {
+        self.fields.as_deref()
+    }
+
+    pub fn cast(&self, dtype: &DType) -> VortexResult<Scalar> {
+        let DType::Struct(st, _) = dtype else {
+            vortex_bail!("Can only cast struct to another struct")
+        };
+        let DType::Struct(own_st, _) = self.dtype() else {
+            unreachable!()
+        };
+
+        if st.dtypes().len() != own_st.dtypes().len() {
+            vortex_bail!(
+                "Cannot cast between structs with different number of fields: {} and {}",
+                own_st.dtypes().len(),
+                st.dtypes().len()
+            );
+        }
+
+        if let Some(fs) = self.fields() {
+            let fields = fs
+                .iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    Scalar {
+                        dtype: own_st.dtypes()[i].clone(),
+                        value: f.clone(),
+                    }
+                    .cast(&st.dtypes()[i])
+                    .map(|s| s.value)
+                })
+                .collect::<VortexResult<Vec<_>>>()?;
+            Ok(Scalar {
+                dtype: dtype.clone(),
+                value: ScalarValue::List(fields.into()),
+            })
+        } else {
+            Ok(Scalar::null(dtype.clone()))
+        }
+    }
+
+    pub fn project(&self, projection: &[Field]) -> VortexResult<Scalar> {
+        let struct_dtype = self
+            .dtype
+            .as_struct()
+            .ok_or_else(|| vortex_err!("Not a struct dtype"))?;
+        let projected_dtype = struct_dtype.project(projection)?;
+        let new_fields = if let Some(fs) = self.fields() {
+            ScalarValue::List(
+                projection
+                    .iter()
+                    .map(|p| match p {
+                        Field::Name(n) => struct_dtype
+                            .find_name(n)
+                            .vortex_expect("DType has been successfully projected already"),
+                        Field::Index(i) => *i,
+                    })
+                    .map(|i| fs[i].clone())
+                    .collect(),
+            )
+        } else {
+            ScalarValue::Null
+        };
+        Ok(Scalar::new(
+            DType::Struct(projected_dtype, self.dtype().nullability()),
+            new_fields,
+        ))
     }
 }
 
@@ -56,7 +127,7 @@ impl<'a> TryFrom<&'a Scalar> for StructScalar<'a> {
     type Error = VortexError;
 
     fn try_from(value: &'a Scalar) -> Result<Self, Self::Error> {
-        if matches!(value.dtype(), DType::Struct(..)) {
+        if !matches!(value.dtype(), DType::Struct(..)) {
             vortex_bail!("Expected struct scalar, found {}", value.dtype())
         }
         Ok(Self {

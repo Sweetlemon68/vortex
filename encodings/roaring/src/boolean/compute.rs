@@ -19,7 +19,11 @@ impl ArrayCompute for RoaringBoolArray {
 
 impl ScalarAtFn for RoaringBoolArray {
     fn scalar_at(&self, index: usize) -> VortexResult<Scalar> {
-        Ok(self.bitmap().contains(index as u32).into())
+        Ok(<Self as ScalarAtFn>::scalar_at_unchecked(self, index))
+    }
+
+    fn scalar_at_unchecked(&self, index: usize) -> Scalar {
+        self.bitmap().contains(index as u32).into()
     }
 }
 
@@ -28,6 +32,50 @@ impl SliceFn for RoaringBoolArray {
         let slice_bitmap = Bitmap::from_range(start as u32..stop as u32);
         let bitmap = self.bitmap().and(&slice_bitmap).add_offset(-(start as i64));
 
-        Self::try_new(bitmap, stop - start).map(|a| a.into_array())
+        Self::try_new(bitmap, stop - start).map(IntoArray::into_array)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use vortex::array::BoolArray;
+    use vortex::compute::slice;
+    use vortex::compute::unary::scalar_at;
+    use vortex::{IntoArray, IntoArrayVariant};
+    use vortex_scalar::Scalar;
+
+    use crate::RoaringBoolArray;
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    pub fn test_scalar_at() {
+        let bool = BoolArray::from(vec![true, false, true, true]);
+        let array = RoaringBoolArray::encode(bool.into_array()).unwrap();
+
+        let truthy: Scalar = true.into();
+        let falsy: Scalar = false.into();
+
+        assert_eq!(scalar_at(&array, 0).unwrap(), truthy);
+        assert_eq!(scalar_at(&array, 1).unwrap(), falsy);
+        assert_eq!(scalar_at(&array, 2).unwrap(), truthy);
+        assert_eq!(scalar_at(&array, 3).unwrap(), truthy);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    pub fn test_slice() {
+        let bool = BoolArray::from(vec![true, false, true, true]);
+        let array = RoaringBoolArray::encode(bool.into_array()).unwrap();
+        let sliced = slice(&array, 1, 3).unwrap();
+
+        assert_eq!(
+            sliced
+                .into_bool()
+                .unwrap()
+                .boolean_buffer()
+                .iter()
+                .collect::<Vec<_>>(),
+            &[false, true]
+        );
     }
 }

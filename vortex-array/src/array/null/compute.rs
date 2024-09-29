@@ -1,5 +1,5 @@
 use vortex_dtype::{match_each_integer_ptype, DType};
-use vortex_error::VortexResult;
+use vortex_error::{vortex_bail, VortexResult};
 use vortex_scalar::Scalar;
 
 use crate::array::null::NullArray;
@@ -23,16 +23,17 @@ impl ArrayCompute for NullArray {
 
 impl SliceFn for NullArray {
     fn slice(&self, start: usize, stop: usize) -> VortexResult<Array> {
-        assert!(stop < self.len(), "cannot slice past end of the array");
         Ok(NullArray::new(stop - start).into_array())
     }
 }
 
 impl ScalarAtFn for NullArray {
     fn scalar_at(&self, index: usize) -> VortexResult<Scalar> {
-        assert!(index < self.len(), "cannot index past end of the array");
+        Ok(self.scalar_at_unchecked(index))
+    }
 
-        Ok(Scalar::null(DType::Null))
+    fn scalar_at_unchecked(&self, _index: usize) -> Scalar {
+        Scalar::null(DType::Null)
     }
 }
 
@@ -43,7 +44,9 @@ impl TakeFn for NullArray {
         // Enforce all indices are valid
         match_each_integer_ptype!(indices.ptype(), |$T| {
             for index in indices.maybe_null_slice::<$T>() {
-                assert!((*index as usize) < self.len(), "cannot take past end of the array");
+                if !((*index as usize) < self.len()) {
+                    vortex_bail!(OutOfBounds: *index as usize, 0, self.len());
+                }
             }
         });
 
@@ -76,9 +79,8 @@ mod test {
     #[test]
     fn test_take_nulls() {
         let nulls = NullArray::new(10).into_array();
-        let taken =
-            NullArray::try_from(take(&nulls, &vec![0u64, 2, 4, 6, 8].into_array()).unwrap())
-                .unwrap();
+        let taken = NullArray::try_from(take(&nulls, vec![0u64, 2, 4, 6, 8].into_array()).unwrap())
+            .unwrap();
 
         assert_eq!(taken.len(), 5);
         assert!(matches!(

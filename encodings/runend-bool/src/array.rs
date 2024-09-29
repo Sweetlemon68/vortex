@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use vortex::compute::unary::scalar_at;
 use vortex::compute::{search_sorted, SearchSortedSide};
+use vortex::encoding::ids;
 use vortex::stats::{ArrayStatistics, ArrayStatisticsCompute, StatsSet};
 use vortex::validity::{ArrayValidity, LogicalValidity, Validity, ValidityMetadata};
 use vortex::variants::{ArrayVariants, BoolArrayTrait};
@@ -10,11 +11,11 @@ use vortex::{
     IntoCanonical,
 };
 use vortex_dtype::{DType, Nullability};
-use vortex_error::{vortex_bail, VortexResult};
+use vortex_error::{vortex_bail, VortexExpect as _, VortexResult};
 
 use crate::compress::runend_bool_decode;
 
-impl_encoding!("vortex.runendbool", 23u16, RunEndBool);
+impl_encoding!("vortex.runendbool", ids::RUN_END_BOOL, RunEndBool);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunEndBoolMetadata {
@@ -67,17 +68,16 @@ impl RunEndBoolArray {
     }
 
     pub fn find_physical_index(&self, index: usize) -> VortexResult<usize> {
-        if index > self.len() {
-            vortex_bail!("Index must be in array slice",);
-        }
         search_sorted(&self.ends(), index + self.offset(), SearchSortedSide::Right)
-            .map(|s| s.to_index())
+            .map(|s| s.to_ends_index(self.ends().len()))
     }
 
     pub fn validity(&self) -> Validity {
-        self.metadata()
-            .validity
-            .to_validity(self.array().child(2, &Validity::DTYPE, self.len()))
+        self.metadata().validity.to_validity(|| {
+            self.as_ref()
+                .child(2, &Validity::DTYPE, self.len())
+                .vortex_expect("RunEndBoolArray: validity child")
+        })
     }
 
     #[inline]
@@ -92,9 +92,9 @@ impl RunEndBoolArray {
 
     #[inline]
     pub fn ends(&self) -> Array {
-        self.array()
+        self.as_ref()
             .child(0, &self.metadata().ends_dtype, self.metadata().num_runs)
-            .expect("missing ends")
+            .vortex_expect("RunEndBoolArray is missing its run ends")
     }
 }
 
@@ -169,9 +169,9 @@ mod test {
         assert_eq!(arr.len(), 5);
         assert_eq!(arr.dtype(), &DType::Bool(Nullability::NonNullable));
 
-        assert_eq!(scalar_at(arr.array(), 0).unwrap(), false.into());
-        assert_eq!(scalar_at(arr.array(), 2).unwrap(), true.into());
-        assert_eq!(scalar_at(arr.array(), 4).unwrap(), false.into());
+        assert_eq!(scalar_at(arr.as_ref(), 0).unwrap(), false.into());
+        assert_eq!(scalar_at(arr.as_ref(), 2).unwrap(), true.into());
+        assert_eq!(scalar_at(arr.as_ref(), 4).unwrap(), false.into());
     }
 
     #[test]
@@ -184,7 +184,7 @@ mod test {
                 Validity::NonNullable,
             )
             .unwrap()
-            .array(),
+            .as_ref(),
             2,
             8,
         )
@@ -233,14 +233,13 @@ mod test {
     #[test]
     fn take_bool() {
         let arr = take(
-            &RunEndBoolArray::try_new(
+            RunEndBoolArray::try_new(
                 vec![2u32, 4, 5, 10].into_array(),
                 true,
                 Validity::NonNullable,
             )
-            .unwrap()
-            .to_array(),
-            &vec![0, 0, 6, 4].into_array(),
+            .unwrap(),
+            vec![0, 0, 6, 4].into_array(),
         )
         .unwrap();
 

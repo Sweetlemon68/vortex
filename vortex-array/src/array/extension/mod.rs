@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use vortex_dtype::{DType, ExtDType, ExtID};
-use vortex_error::VortexResult;
+use vortex_error::{VortexExpect as _, VortexResult};
 
+use crate::encoding::ids;
 use crate::stats::ArrayStatisticsCompute;
 use crate::validity::{ArrayValidity, LogicalValidity};
 use crate::variants::{ArrayVariants, ExtensionArrayTrait};
@@ -10,7 +11,7 @@ use crate::{impl_encoding, Array, ArrayDType, ArrayDef, ArrayTrait, Canonical, I
 
 mod compute;
 
-impl_encoding!("vortex.ext", 16u16, Extension);
+impl_encoding!("vortex.ext", ids::EXTENSION, Extension);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionMetadata {
@@ -28,27 +29,19 @@ impl ExtensionArray {
             [storage].into(),
             Default::default(),
         )
-        .expect("Invalid ExtensionArray")
+        .vortex_expect("Invalid ExtensionArray")
     }
 
     pub fn storage(&self) -> Array {
-        self.array()
+        self.as_ref()
             .child(0, &self.metadata().storage_dtype, self.len())
-            .expect("Missing storage array")
+            .vortex_expect("Missing storage array for ExtensionArray")
     }
 
     #[allow(dead_code)]
     #[inline]
     pub fn id(&self) -> &ExtID {
         self.ext_dtype().id()
-    }
-
-    #[inline]
-    pub fn ext_dtype(&self) -> &ExtDType {
-        let DType::Extension(ext, _) = self.dtype() else {
-            unreachable!();
-        };
-        ext
     }
 }
 
@@ -60,7 +53,11 @@ impl ArrayVariants for ExtensionArray {
     }
 }
 
-impl ExtensionArrayTrait for ExtensionArray {}
+impl ExtensionArrayTrait for ExtensionArray {
+    fn storage_array(&self) -> Array {
+        self.storage()
+    }
+}
 
 impl IntoCanonical for ExtensionArray {
     fn into_canonical(self) -> VortexResult<Canonical> {

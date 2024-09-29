@@ -12,6 +12,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
   build:
@@ -20,9 +21,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/cleanup
-
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
 
       - uses: ./.github/actions/setup-rust
       - uses: ./.github/actions/setup-python
@@ -44,30 +42,48 @@ jobs:
         run: cargo build --all-features --all-targets
 
       - name: Pytest - PyVortex
-        run: rye run pytest --benchmark-disable test/
+        run: |
+          rye run maturin develop --skip-install
+          rye run pytest --benchmark-disable test/
         working-directory: pyvortex/
+
+      - name: Doctest - PyVortex
+        run: |
+          source ../.venv/bin/activate && make clean && make doctest
+        working-directory: docs/
 
       - name: License Check
         run: cargo install --locked cargo-deny && cargo deny check
-      - uses: rustsec/audit-check@v1.4.1
+      - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          ignore: "RUSTSEC-2023-0086"
 
   miri:
     name: 'miri'
     runs-on: ubuntu-latest
     env:
-      RUST_BACKTRACE: 1
       MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-backtrace=full
     steps:
       - uses: actions/checkout@v4
-
       - uses: ./.github/actions/cleanup
-
-      - name: Install Protoc
-        uses: arduino/setup-protoc@v3
-
       - uses: ./.github/actions/setup-rust
-
       - name: Run tests with Miri
         run: cargo miri test
+
+  bench-test:
+    name: 'bench test'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/cleanup
+
+      - uses: ./.github/actions/setup-rust
+      - uses: ./.github/actions/setup-python
+      # Required to run benchmarks
+      - name: Install DuckDB
+        uses: opt-nc/setup-duckdb-action@v1.0.9
+        with:
+          version: v1.0.0
+      - name: Rust Bench as test
+        run: cargo bench --bench '*[!noci]' -- --test

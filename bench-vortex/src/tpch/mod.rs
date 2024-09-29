@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
 use std::fs;
 use std::fs::create_dir_all;
 use std::path::Path;
@@ -21,20 +22,47 @@ use vortex_datafusion::persistent::config::{VortexFile, VortexTableOptions};
 use vortex_datafusion::SessionContextExt;
 use vortex_dtype::DType;
 use vortex_sampling_compressor::SamplingCompressor;
-use vortex_serde::layouts::writer::LayoutWriter;
+use vortex_serde::layouts::LayoutWriter;
 
 use crate::idempotent_async;
 
 pub mod dbgen;
+mod execute;
 pub mod schema;
 
-#[derive(Clone, Copy, Debug)]
+pub use execute::*;
+
+pub const EXPECTED_ROW_COUNTS: [usize; 23] = [
+    0, 4, 460, 11620, 5, 5, 1, 4, 2, 175, 37967, 1048, 2, 42, 1, 1, 18314, 1, 57, 1, 186, 411, 7,
+];
+
+// Sizes match default compressor configuration
+const TARGET_BLOCK_BYTESIZE: usize = 16 * (1 << 20);
+const TARGET_BLOCK_SIZE: usize = 64 * (1 << 10);
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum Format {
     Csv,
     Arrow,
     Parquet,
     InMemoryVortex { enable_pushdown: bool },
     OnDiskVortex { enable_compression: bool },
+}
+
+impl Display for Format {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Format::Csv => write!(f, "csv"),
+            Format::Arrow => write!(f, "arrow"),
+            Format::Parquet => write!(f, "parquet"),
+            Format::InMemoryVortex { enable_pushdown } => {
+                write!(f, "in_memory_vortex(pushdown={enable_pushdown})")
+            }
+            Format::OnDiskVortex { enable_compression } => {
+                write!(f, "on_disk_vortex(compressed={enable_compression})")
+            }
+        }
+    }
 }
 
 // Generate table dataset.
@@ -221,10 +249,9 @@ async fn register_vortex_file(
 
         // Create a ChunkedArray from the set of chunks.
         let sts = record_batches
-            .iter()
-            .cloned()
-            .map(Array::from)
-            .map(|a| a.into_struct().unwrap())
+            .into_iter()
+            .map(Array::try_from)
+            .map(|a| a.unwrap().into_struct().unwrap())
             .collect::<Vec<_>>();
 
         let mut arrays_map: HashMap<Arc<str>, Vec<Array>> = HashMap::default();
@@ -248,13 +275,16 @@ async fn register_vortex_file(
             .iter()
             .map(|field| {
                 let name: Arc<str> = field.name().as_str().into();
-                let dtype = types_map.get(&name).unwrap().clone();
+                let dtype = types_map[&name].clone();
                 let chunks = arrays_map.remove(&name).unwrap();
+                let mut chunked_child = ChunkedArray::try_new(chunks, dtype).unwrap();
+                if !enable_compression {
+                    chunked_child = chunked_child
+                        .rechunk(TARGET_BLOCK_BYTESIZE, TARGET_BLOCK_SIZE)
+                        .unwrap()
+                }
 
-                (
-                    name.clone(),
-                    ChunkedArray::try_new(chunks, dtype).unwrap().into_array(),
-                )
+                (name, chunked_child.into_array())
             })
             .collect::<Vec<_>>();
 
@@ -335,8 +365,7 @@ async fn register_vortex(
 
     // Create a ChunkedArray from the set of chunks.
     let chunks: Vec<Array> = record_batches
-        .iter()
-        .cloned()
+        .into_iter()
         .map(ArrowStructArray::from)
         .map(|struct_array| Array::from_arrow(&struct_array, false))
         .collect();
@@ -353,18 +382,55 @@ async fn register_vortex(
     Ok(())
 }
 
-pub fn tpch_queries() -> impl Iterator<Item = (usize, String)> {
-    (1..=22)
-        .filter(|q| {
-            // Query 15 has multiple SQL statements so doesn't yet run in DataFusion.
-            *q != 15
-        })
-        .map(|q| (q, tpch_query(q)))
+/// Load a table as an uncompressed Vortex array.
+pub async fn load_table(data_dir: impl AsRef<Path>, name: &str, schema: &Schema) -> Array {
+    // Create a local session to load the CSV file from the path.
+    let path = data_dir
+        .as_ref()
+        .to_owned()
+        .join(format!("{name}.tbl"))
+        .to_str()
+        .unwrap()
+        .to_string();
+    let record_batches = SessionContext::new()
+        .read_csv(
+            &path,
+            CsvReadOptions::default()
+                .delimiter(b'|')
+                .has_header(false)
+                .file_extension("tbl")
+                .schema(schema),
+        )
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let chunks: Vec<Array> = record_batches
+        .into_iter()
+        .map(ArrowStructArray::from)
+        .map(|struct_array| Array::from_arrow(&struct_array, false))
+        .collect();
+
+    let dtype = chunks[0].dtype().clone();
+
+    ChunkedArray::try_new(chunks, dtype).unwrap().into_array()
 }
 
-pub fn tpch_query(query_idx: usize) -> String {
+pub fn tpch_queries() -> impl Iterator<Item = (usize, Vec<String>)> {
+    (1..=22).map(|q| (q, tpch_query(q)))
+}
+
+fn tpch_query(query_idx: usize) -> Vec<String> {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tpch")
         .join(format!("q{}.sql", query_idx));
-    fs::read_to_string(manifest_dir).unwrap()
+    fs::read_to_string(manifest_dir)
+        .unwrap()
+        .split(';')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
 }

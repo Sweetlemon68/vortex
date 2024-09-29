@@ -2,18 +2,19 @@ use std::fmt::Debug;
 
 pub use compress::*;
 use serde::{Deserialize, Serialize};
+use vortex::encoding::ids;
 use vortex::stats::{ArrayStatisticsCompute, StatsSet};
 use vortex::validity::{ArrayValidity, LogicalValidity, Validity, ValidityMetadata};
 use vortex::variants::{ArrayVariants, PrimitiveArrayTrait};
 use vortex::visitor::{AcceptArrayVisitor, ArrayVisitor};
 use vortex::{impl_encoding, Array, ArrayDType, ArrayDef, ArrayTrait, Canonical, IntoCanonical};
 use vortex_dtype::match_each_unsigned_integer_ptype;
-use vortex_error::{vortex_bail, VortexResult};
+use vortex_error::{vortex_bail, vortex_panic, VortexExpect as _, VortexResult};
 
 mod compress;
 mod compute;
 
-impl_encoding!("fastlanes.delta", 16u16, Delta);
+impl_encoding!("fastlanes.delta", ids::FL_DELTA, Delta);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeltaMetadata {
@@ -59,30 +60,38 @@ impl DeltaArray {
 
     #[inline]
     pub fn bases(&self) -> Array {
-        self.array()
+        self.as_ref()
             .child(0, self.dtype(), self.bases_len())
-            .expect("Missing bases")
+            .vortex_expect("DeltaArray is missing bases child array")
     }
 
     #[inline]
     pub fn deltas(&self) -> Array {
-        self.array()
+        self.as_ref()
             .child(1, self.dtype(), self.len())
-            .expect("Missing deltas")
+            .vortex_expect("DeltaArray is missing deltas child array")
     }
 
     #[inline]
     fn lanes(&self) -> usize {
-        let ptype = self.dtype().try_into().unwrap();
+        let ptype = self.dtype().try_into().unwrap_or_else(|err| {
+            vortex_panic!(
+                err,
+                "Failed to convert DeltaArray DType {} to PType",
+                self.dtype()
+            )
+        });
         match_each_unsigned_integer_ptype!(ptype, |$T| {
             <$T as fastlanes::FastLanes>::LANES
         })
     }
 
     pub fn validity(&self) -> Validity {
-        self.metadata()
-            .validity
-            .to_validity(self.array().child(2, &Validity::DTYPE, self.len()))
+        self.metadata().validity.to_validity(|| {
+            self.as_ref()
+                .child(2, &Validity::DTYPE, self.len())
+                .vortex_expect("DeltaArray: validity child")
+        })
     }
 
     fn bases_len(&self) -> usize {

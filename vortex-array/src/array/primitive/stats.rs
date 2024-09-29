@@ -1,10 +1,11 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::mem::size_of;
 
 use arrow_buffer::buffer::BooleanBuffer;
 use num_traits::PrimInt;
 use vortex_dtype::half::f16;
-use vortex_dtype::{match_each_native_ptype, NativePType};
+use vortex_dtype::{match_each_native_ptype, DType, NativePType, Nullability};
 use vortex_error::VortexResult;
 use vortex_scalar::Scalar;
 
@@ -40,7 +41,7 @@ impl<T: PStatsType> ArrayStatisticsCompute for &[T] {
         }
         let mut stats = StatsAccumulator::new(self[0]);
         self.iter().skip(1).for_each(|next| stats.next(*next));
-        Ok(stats.into_map())
+        Ok(stats.finish())
     }
 }
 
@@ -59,20 +60,24 @@ impl<'a, T: PStatsType> ArrayStatisticsCompute for NullableValues<'a, T> {
             .enumerate()
             .skip_while(|(_, valid)| !*valid)
             .map(|(idx, _)| idx)
-            .next()
-            .expect("Must be at least one non-null value");
+            .next();
 
-        let mut stats = StatsAccumulator::new_with_leading_nulls(
-            values[first_non_null_idx],
-            first_non_null_idx,
-        );
-        values
-            .iter()
-            .zip(self.1.iter())
-            .skip(first_non_null_idx + 1)
-            .map(|(next, valid)| valid.then_some(*next))
-            .for_each(|next| stats.nullable_next(next));
-        Ok(stats.into_map())
+        if let Some(first_non_null) = first_non_null_idx {
+            let mut acc = StatsAccumulator::new(values[first_non_null]);
+            acc.n_nulls(first_non_null);
+            self.0
+                .iter()
+                .zip(self.1.iter())
+                .skip(first_non_null + 1)
+                .map(|(next, valid)| valid.then_some(*next))
+                .for_each(|next| acc.nullable_next(next));
+            Ok(acc.finish())
+        } else {
+            Ok(StatsSet::nulls(
+                self.0.len(),
+                &DType::Primitive(T::PTYPE, Nullability::Nullable),
+            ))
+        }
     }
 }
 
@@ -131,8 +136,10 @@ struct StatsAccumulator<T: PStatsType> {
     is_strict_sorted: bool,
     run_count: usize,
     null_count: usize,
+    nan_count: usize,
     bit_widths: Vec<usize>,
     trailing_zeros: Vec<usize>,
+    len: usize,
 }
 
 impl<T: PStatsType> StatsAccumulator<T> {
@@ -147,18 +154,19 @@ impl<T: PStatsType> StatsAccumulator<T> {
             null_count: 0,
             bit_widths: vec![0; size_of::<T>() * 8 + 1],
             trailing_zeros: vec![0; size_of::<T>() * 8 + 1],
+            len: 1,
+            nan_count: first_value.is_nan().then_some(1).unwrap_or_default(),
         };
         stats.bit_widths[first_value.bit_width() as usize] += 1;
         stats.trailing_zeros[first_value.trailing_zeros() as usize] += 1;
         stats
     }
 
-    fn new_with_leading_nulls(first_value: T, leading_null_count: usize) -> Self {
-        let mut stats = Self::new(first_value);
-        stats.null_count += leading_null_count;
-        stats.bit_widths[0] += leading_null_count;
-        stats.trailing_zeros[T::PTYPE.bit_width()] += leading_null_count;
-        stats
+    fn n_nulls(&mut self, n_nulls: usize) {
+        self.null_count += n_nulls;
+        self.bit_widths[0] += n_nulls;
+        self.trailing_zeros[T::PTYPE.bit_width()] += n_nulls;
+        self.len += n_nulls;
     }
 
     pub fn nullable_next(&mut self, next: Option<T>) {
@@ -168,6 +176,7 @@ impl<T: PStatsType> StatsAccumulator<T> {
                 self.bit_widths[0] += 1;
                 self.trailing_zeros[T::PTYPE.bit_width()] += 1;
                 self.null_count += 1;
+                self.len += 1;
             }
         }
     }
@@ -175,29 +184,37 @@ impl<T: PStatsType> StatsAccumulator<T> {
     pub fn next(&mut self, next: T) {
         self.bit_widths[next.bit_width() as usize] += 1;
         self.trailing_zeros[next.trailing_zeros() as usize] += 1;
+        self.len += 1;
 
-        if self.prev == next {
+        if next.is_nan() {
+            self.nan_count += 1;
+        }
+
+        if next.is_eq(self.prev) {
             self.is_strict_sorted = false;
         } else {
-            if next < self.prev {
+            if matches!(next.compare(self.prev), Ordering::Less) {
                 self.is_sorted = false;
             }
             self.run_count += 1;
         }
-        if next < self.min {
+        if matches!(next.compare(self.min), Ordering::Less) {
             self.min = next;
-        } else if next > self.max {
+        } else if matches!(next.compare(self.max), Ordering::Greater) {
             self.max = next;
         }
         self.prev = next;
     }
 
-    pub fn into_map(self) -> StatsSet {
+    pub fn finish(self) -> StatsSet {
+        let is_constant = (self.min == self.max && self.null_count == 0 && self.nan_count == 0)
+            || self.null_count == self.len;
+
         StatsSet::from(HashMap::from([
             (Stat::Min, self.min.into()),
             (Stat::Max, self.max.into()),
             (Stat::NullCount, self.null_count.into()),
-            (Stat::IsConstant, (self.min == self.max).into()),
+            (Stat::IsConstant, is_constant.into()),
             (Stat::BitWidthFreq, self.bit_widths.into()),
             (Stat::TrailingZeroFreq, self.trailing_zeros.into()),
             (Stat::IsSorted, self.is_sorted.into()),

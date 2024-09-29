@@ -1,6 +1,6 @@
 use arrow_buffer::NullBuffer;
 use vortex_dtype::{match_each_integer_ptype, DType, NativePType};
-use vortex_error::VortexResult;
+use vortex_error::{vortex_err, vortex_panic, VortexResult};
 
 use crate::array::varbin::builder::VarBinBuilder;
 use crate::array::varbin::VarBinArray;
@@ -10,12 +10,6 @@ use crate::{Array, ArrayDType, IntoArray, IntoArrayVariant};
 
 impl TakeFn for VarBinArray {
     fn take(&self, indices: &Array) -> VortexResult<Array> {
-        // TODO(ngates): support i64 indices.
-        assert!(
-            indices.len() < i32::MAX as usize,
-            "indices.len() must be less than i32::MAX"
-        );
-
         let offsets = self.offsets().into_primitive()?;
         let data = self.bytes().into_primitive()?;
         let indices = indices.clone().into_primitive()?;
@@ -47,9 +41,15 @@ fn take<I: NativePType, O: NativePType>(
 
     let mut builder = VarBinBuilder::<O>::with_capacity(indices.len());
     for &idx in indices {
-        let idx = idx.to_usize().unwrap();
-        let start = offsets[idx].to_usize().unwrap();
-        let stop = offsets[idx + 1].to_usize().unwrap();
+        let idx = idx
+            .to_usize()
+            .ok_or_else(|| vortex_err!("Failed to convert index to usize: {}", idx))?;
+        let start = offsets[idx]
+            .to_usize()
+            .ok_or_else(|| vortex_err!("Failed to convert offset to usize: {}", offsets[idx]))?;
+        let stop = offsets[idx + 1].to_usize().ok_or_else(|| {
+            vortex_err!("Failed to convert offset to usize: {}", offsets[idx + 1])
+        })?;
         builder.push(Some(&data[start..stop]));
     }
     Ok(builder.finish(dtype))
@@ -64,10 +64,16 @@ fn take_nullable<I: NativePType, O: NativePType>(
 ) -> VarBinArray {
     let mut builder = VarBinBuilder::<O>::with_capacity(indices.len());
     for &idx in indices {
-        let idx = idx.to_usize().unwrap();
+        let idx = idx
+            .to_usize()
+            .unwrap_or_else(|| vortex_panic!("Failed to convert index to usize: {}", idx));
         if null_buffer.is_valid(idx) {
-            let start = offsets[idx].to_usize().unwrap();
-            let stop = offsets[idx + 1].to_usize().unwrap();
+            let start = offsets[idx].to_usize().unwrap_or_else(|| {
+                vortex_panic!("Failed to convert offset to usize: {}", offsets[idx])
+            });
+            let stop = offsets[idx + 1].to_usize().unwrap_or_else(|| {
+                vortex_panic!("Failed to convert offset to usize: {}", offsets[idx + 1])
+            });
             builder.push(Some(&data[start..stop]));
         } else {
             builder.push(None);

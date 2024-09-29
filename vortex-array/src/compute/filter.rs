@@ -1,6 +1,6 @@
 use arrow_array::cast::AsArray;
 use vortex_dtype::{DType, Nullability};
-use vortex_error::VortexResult;
+use vortex_error::{vortex_bail, VortexResult};
 
 use crate::arrow::FromArrowArray;
 use crate::{Array, ArrayDType, IntoCanonical};
@@ -20,25 +20,31 @@ pub trait FilterFn {
 ///
 /// The `predicate` must receive an Array with type non-nullable bool, and will panic if this is
 /// not the case.
-pub fn filter(array: &Array, predicate: &Array) -> VortexResult<Array> {
-    assert_eq!(
-        predicate.dtype(),
-        &DType::Bool(Nullability::NonNullable),
-        "predicate must be non-nullable bool"
-    );
-    assert_eq!(
-        predicate.len(),
-        array.len(),
-        "predicate.len() must equal array.len()"
-    );
+pub fn filter(array: impl AsRef<Array>, predicate: impl AsRef<Array>) -> VortexResult<Array> {
+    let array = array.as_ref();
+    let predicate = predicate.as_ref();
+
+    if predicate.dtype() != &DType::Bool(Nullability::NonNullable) {
+        vortex_bail!(
+            "predicate must be non-nullable bool, has dtype {}",
+            predicate.dtype(),
+        );
+    }
+    if predicate.len() != array.len() {
+        vortex_bail!(
+            "predicate.len() is {}, does not equal array.len() of {}",
+            predicate.len(),
+            array.len()
+        );
+    }
 
     array.with_dyn(|a| {
         if let Some(filter_fn) = a.filter() {
             filter_fn.filter(predicate)
         } else {
             // Fallback: implement using Arrow kernels.
-            let array_ref = array.clone().into_canonical()?.into_arrow();
-            let predicate_ref = predicate.clone().into_canonical()?.into_arrow();
+            let array_ref = array.clone().into_canonical()?.into_arrow()?;
+            let predicate_ref = predicate.clone().into_canonical()?.into_arrow()?;
             let filtered =
                 arrow_select::filter::filter(array_ref.as_ref(), predicate_ref.as_boolean())?;
 

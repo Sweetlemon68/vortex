@@ -1,9 +1,10 @@
 use std::fmt::Debug;
 
 use serde::{Deserialize, Serialize};
-use vortex::array::{Primitive, PrimitiveArray};
+use vortex::array::PrimitiveArray;
 use vortex::compute::unary::scalar_at;
-use vortex::compute::{search_sorted, SearchSortedSide};
+use vortex::compute::{search_sorted, search_sorted_u64_many, SearchSortedSide};
+use vortex::encoding::ids;
 use vortex::stats::{ArrayStatistics, ArrayStatisticsCompute, StatsSet};
 use vortex::validity::{ArrayValidity, LogicalValidity, Validity, ValidityMetadata};
 use vortex::variants::{ArrayVariants, PrimitiveArrayTrait};
@@ -13,11 +14,11 @@ use vortex::{
     IntoCanonical,
 };
 use vortex_dtype::DType;
-use vortex_error::{vortex_bail, VortexResult};
+use vortex_error::{vortex_bail, VortexExpect as _, VortexResult};
 
 use crate::compress::{runend_decode, runend_encode};
 
-impl_encoding!("vortex.runend", 19u16, RunEnd);
+impl_encoding!("vortex.runend", ids::RUN_END, RunEnd);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunEndMetadata {
@@ -49,6 +50,13 @@ impl RunEndArray {
             );
         }
 
+        if offset != 0 && !ends.is_empty() {
+            let first_run_end: usize = scalar_at(&ends, 0)?.as_ref().try_into()?;
+            if first_run_end <= offset {
+                vortex_bail!("First run end {first_run_end} must be bigger than offset {offset}");
+            }
+        }
+
         if !ends.statistics().compute_is_strict_sorted().unwrap_or(true) {
             vortex_bail!("Ends array must be strictly sorted",);
         }
@@ -71,44 +79,76 @@ impl RunEndArray {
         Self::try_from_parts(dtype, length, metadata, children.into(), StatsSet::new())
     }
 
+    /// Convert the given logical index to an index into the `values` array
     pub fn find_physical_index(&self, index: usize) -> VortexResult<usize> {
         search_sorted(&self.ends(), index + self.offset(), SearchSortedSide::Right)
-            .map(|s| s.to_index())
+            .map(|s| s.to_ends_index(self.ends().len()))
     }
 
+    /// Convert a batch of logical indices into an index for the values. Expects indices to be adjusted by offset unlike
+    /// [Self::find_physical_index]
+    ///
+    /// See: [find_physical_index][Self::find_physical_index].
+    pub fn find_physical_indices(&self, indices: &[u64]) -> VortexResult<Vec<usize>> {
+        search_sorted_u64_many(
+            &self.ends(),
+            indices,
+            &vec![SearchSortedSide::Right; indices.len()],
+        )
+        .map(|results| {
+            results
+                .iter()
+                .map(|result| result.to_ends_index(self.ends().len()))
+                .collect()
+        })
+    }
+
+    /// Run the array through run-end encoding.
     pub fn encode(array: Array) -> VortexResult<Self> {
-        if array.encoding().id() == Primitive::ID {
-            let primitive = PrimitiveArray::try_from(array)?;
-            let (ends, values) = runend_encode(&primitive);
-            Self::try_new(ends.into_array(), values.into_array(), primitive.validity())
+        if let Ok(parray) = PrimitiveArray::try_from(array) {
+            let (ends, values) = runend_encode(&parray);
+            Self::try_new(ends.into_array(), values.into_array(), parray.validity())
         } else {
             vortex_bail!("REE can only encode primitive arrays")
         }
     }
 
     pub fn validity(&self) -> Validity {
-        self.metadata()
-            .validity
-            .to_validity(self.array().child(2, &Validity::DTYPE, self.len()))
+        self.metadata().validity.to_validity(|| {
+            self.as_ref()
+                .child(2, &Validity::DTYPE, self.len())
+                .vortex_expect("RunEndArray: validity child")
+        })
     }
 
+    /// The offset that the `ends` is relative to.
+    ///
+    /// This is generally zero for a "new" array, and non-zero after a slicing operation.
     #[inline]
     pub fn offset(&self) -> usize {
         self.metadata().offset
     }
 
+    /// The encoded "ends" of value runs.
+    ///
+    /// The `i`-th element indicates that there is a run of the same value, beginning
+    /// at `ends[i]` (inclusive) and terminating at `ends[i+1]` (exclusive).
     #[inline]
     pub fn ends(&self) -> Array {
-        self.array()
+        self.as_ref()
             .child(0, &self.metadata().ends_dtype, self.metadata().num_runs)
-            .expect("missing ends")
+            .vortex_expect("RunEndArray is missing its run ends")
     }
 
+    /// The scalar values.
+    ///
+    /// The `i`-th element is the scalar value for the `i`-th repeated run. The run begins
+    /// at `ends[i]` (inclusive) and terminates at `ends[i+1]` (exclusive).
     #[inline]
     pub fn values(&self) -> Array {
-        self.array()
+        self.as_ref()
             .child(1, self.dtype(), self.metadata().num_runs)
-            .expect("missing values")
+            .vortex_expect("RunEndArray is missing its values")
     }
 }
 
@@ -152,11 +192,10 @@ impl AcceptArrayVisitor for RunEndArray {
 impl ArrayStatisticsCompute for RunEndArray {}
 
 #[cfg(test)]
-mod test {
-    use vortex::compute::slice;
+mod tests {
     use vortex::compute::unary::scalar_at;
     use vortex::validity::Validity;
-    use vortex::{ArrayDType, IntoArray, IntoArrayVariant};
+    use vortex::{ArrayDType, IntoArray};
     use vortex_dtype::{DType, Nullability, PType};
 
     use crate::RunEndArray;
@@ -178,76 +217,9 @@ mod test {
         // 0, 1 => 1
         // 2, 3, 4 => 2
         // 5, 6, 7, 8, 9 => 3
-        assert_eq!(scalar_at(arr.array(), 0).unwrap(), 1.into());
-        assert_eq!(scalar_at(arr.array(), 2).unwrap(), 2.into());
-        assert_eq!(scalar_at(arr.array(), 5).unwrap(), 3.into());
-        assert_eq!(scalar_at(arr.array(), 9).unwrap(), 3.into());
-    }
-
-    #[test]
-    fn slice_array() {
-        let arr = slice(
-            RunEndArray::try_new(
-                vec![2u32, 5, 10].into_array(),
-                vec![1i32, 2, 3].into_array(),
-                Validity::NonNullable,
-            )
-            .unwrap()
-            .array(),
-            3,
-            8,
-        )
-        .unwrap();
-        assert_eq!(
-            arr.dtype(),
-            &DType::Primitive(PType::I32, Nullability::NonNullable)
-        );
-        assert_eq!(arr.len(), 5);
-
-        assert_eq!(
-            arr.into_primitive().unwrap().maybe_null_slice::<i32>(),
-            vec![2, 2, 3, 3, 3]
-        );
-    }
-
-    #[test]
-    fn slice_end_inclusive() {
-        let arr = slice(
-            RunEndArray::try_new(
-                vec![2u32, 5, 10].into_array(),
-                vec![1i32, 2, 3].into_array(),
-                Validity::NonNullable,
-            )
-            .unwrap()
-            .array(),
-            4,
-            10,
-        )
-        .unwrap();
-        assert_eq!(
-            arr.dtype(),
-            &DType::Primitive(PType::I32, Nullability::NonNullable)
-        );
-        assert_eq!(arr.len(), 6);
-
-        assert_eq!(
-            arr.into_primitive().unwrap().maybe_null_slice::<i32>(),
-            vec![2, 3, 3, 3, 3, 3]
-        );
-    }
-
-    #[test]
-    fn flatten() {
-        let arr = RunEndArray::try_new(
-            vec![2u32, 5, 10].into_array(),
-            vec![1i32, 2, 3].into_array(),
-            Validity::NonNullable,
-        )
-        .unwrap();
-
-        assert_eq!(
-            arr.into_primitive().unwrap().maybe_null_slice::<i32>(),
-            vec![1, 1, 2, 2, 2, 3, 3, 3, 3, 3]
-        );
+        assert_eq!(scalar_at(arr.as_ref(), 0).unwrap(), 1.into());
+        assert_eq!(scalar_at(arr.as_ref(), 2).unwrap(), 2.into());
+        assert_eq!(scalar_at(arr.as_ref(), 5).unwrap(), 3.into());
+        assert_eq!(scalar_at(arr.as_ref(), 9).unwrap(), 3.into());
     }
 }

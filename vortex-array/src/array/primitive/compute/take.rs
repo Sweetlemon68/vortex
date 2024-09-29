@@ -1,6 +1,6 @@
 use num_traits::PrimInt;
 use vortex_dtype::{match_each_integer_ptype, match_each_native_ptype, NativePType};
-use vortex_error::VortexResult;
+use vortex_error::{vortex_panic, VortexResult};
 
 use crate::array::primitive::PrimitiveArray;
 use crate::compute::TakeFn;
@@ -14,7 +14,7 @@ impl TakeFn for PrimitiveArray {
             match_each_integer_ptype!(indices.ptype(), |$I| {
                 Ok(PrimitiveArray::from_vec(
                     take_primitive(self.maybe_null_slice::<$T>(), indices.maybe_null_slice::<$I>()),
-                    validity.take(indices.array())?,
+                    validity.take(indices.as_ref())?,
                 ).into_array())
             })
         })
@@ -24,7 +24,11 @@ impl TakeFn for PrimitiveArray {
 fn take_primitive<T: NativePType, I: NativePType + PrimInt>(array: &[T], indices: &[I]) -> Vec<T> {
     indices
         .iter()
-        .map(|&idx| array[idx.to_usize().unwrap()])
+        .map(|&idx| {
+            array[idx.to_usize().unwrap_or_else(|| {
+                vortex_panic!("Failed to convert index to usize: {}", idx);
+            })]
+        })
         .collect()
 }
 

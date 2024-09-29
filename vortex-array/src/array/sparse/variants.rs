@@ -1,4 +1,6 @@
+use vortex_dtype::field::Field;
 use vortex_dtype::DType;
+use vortex_error::{vortex_err, VortexExpect, VortexResult};
 use vortex_scalar::StructScalar;
 
 use crate::array::sparse::SparseArray;
@@ -11,67 +13,35 @@ use crate::{Array, ArrayDType, IntoArray};
 /// Sparse arrays support all DTypes
 impl ArrayVariants for SparseArray {
     fn as_null_array(&self) -> Option<&dyn NullArrayTrait> {
-        if matches!(self.dtype(), DType::Null) {
-            Some(self)
-        } else {
-            None
-        }
+        matches!(self.dtype(), DType::Null).then_some(self)
     }
 
     fn as_bool_array(&self) -> Option<&dyn BoolArrayTrait> {
-        if matches!(self.dtype(), DType::Bool(_)) {
-            Some(self)
-        } else {
-            None
-        }
+        matches!(self.dtype(), DType::Bool(_)).then_some(self)
     }
 
     fn as_primitive_array(&self) -> Option<&dyn PrimitiveArrayTrait> {
-        if matches!(self.dtype(), DType::Primitive(..)) {
-            Some(self)
-        } else {
-            None
-        }
+        matches!(self.dtype(), DType::Primitive(..)).then_some(self)
     }
 
     fn as_utf8_array(&self) -> Option<&dyn Utf8ArrayTrait> {
-        if matches!(self.dtype(), DType::Utf8(_)) {
-            Some(self)
-        } else {
-            None
-        }
+        matches!(self.dtype(), DType::Utf8(_)).then_some(self)
     }
 
     fn as_binary_array(&self) -> Option<&dyn BinaryArrayTrait> {
-        if matches!(self.dtype(), DType::Binary(_)) {
-            Some(self)
-        } else {
-            None
-        }
+        matches!(self.dtype(), DType::Binary(_)).then_some(self)
     }
 
     fn as_struct_array(&self) -> Option<&dyn StructArrayTrait> {
-        if matches!(self.dtype(), DType::Struct(..)) {
-            Some(self)
-        } else {
-            None
-        }
+        matches!(self.dtype(), DType::Struct(..)).then_some(self)
     }
 
     fn as_list_array(&self) -> Option<&dyn ListArrayTrait> {
-        if matches!(self.dtype(), DType::List(..)) {
-            Some(self)
-        } else {
-            None
-        }
+        matches!(self.dtype(), DType::List(..)).then_some(self)
     }
 
     fn as_extension_array(&self) -> Option<&dyn ExtensionArrayTrait> {
-        if matches!(self.dtype(), DType::Extension(..)) {
-            Some(self)
-        } else {
-            None
-        }
+        matches!(self.dtype(), DType::Extension(..)).then_some(self)
     }
 }
 
@@ -110,12 +80,43 @@ impl StructArrayTrait for SparseArray {
                 self.indices_offset(),
                 scalar,
             )
-            .unwrap()
+            .ok()?
             .into_array(),
         )
+    }
+
+    fn project(&self, projection: &[Field]) -> VortexResult<Array> {
+        let values = self.values().with_dyn(|s| {
+            s.as_struct_array()
+                .ok_or_else(|| vortex_err!("Chunk was not a StructArray"))?
+                .project(projection)
+        })?;
+        let scalar = StructScalar::try_from(self.fill_value())?.project(projection)?;
+
+        SparseArray::try_new_with_offset(
+            self.indices().clone(),
+            values,
+            self.len(),
+            self.indices_offset(),
+            scalar,
+        )
+        .map(|a| a.into_array())
     }
 }
 
 impl ListArrayTrait for SparseArray {}
 
-impl ExtensionArrayTrait for SparseArray {}
+impl ExtensionArrayTrait for SparseArray {
+    fn storage_array(&self) -> Array {
+        SparseArray::try_new_with_offset(
+            self.indices().clone(),
+            self.values()
+                .with_dyn(|a| a.as_extension_array_unchecked().storage_array()),
+            self.len(),
+            self.indices_offset(),
+            self.fill_value().clone(),
+        )
+        .vortex_expect("Failed to create new sparse array")
+        .into_array()
+    }
+}

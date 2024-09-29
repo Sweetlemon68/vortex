@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use vortex_error::VortexResult;
+use vortex_error::{vortex_panic, VortexResult};
 use vortex_scalar::Scalar;
 
+use crate::encoding::ids;
 use crate::stats::{Stat, StatsSet};
 use crate::validity::{ArrayValidity, LogicalValidity};
 use crate::visitor::{AcceptArrayVisitor, ArrayVisitor};
@@ -14,7 +15,7 @@ mod compute;
 mod stats;
 mod variants;
 
-impl_encoding!("vortex.constant", 10u16, Constant);
+impl_encoding!("vortex.constant", ids::CONSTANT, Constant);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConstantMetadata {
@@ -37,14 +38,25 @@ impl ConstantArray {
             (Stat::IsSorted, true.into()),
             (Stat::RunCount, 1.into()),
         ]));
+
         Self::try_from_parts(
             scalar.dtype().clone(),
             length,
-            ConstantMetadata { scalar, length },
+            ConstantMetadata {
+                scalar: scalar.clone(),
+                length,
+            },
             [].into(),
             stats,
         )
-        .unwrap()
+        .unwrap_or_else(|err| {
+            vortex_panic!(
+                err,
+                "Failed to create Constant array of length {} from scalar {}",
+                length,
+                scalar
+            )
+        })
     }
 
     pub fn scalar(&self) -> &Scalar {
@@ -57,7 +69,7 @@ impl ArrayTrait for ConstantArray {}
 impl ArrayValidity for ConstantArray {
     fn is_valid(&self, _index: usize) -> bool {
         match self.metadata().scalar.dtype().is_nullable() {
-            true => !self.scalar().is_null(),
+            true => self.scalar().is_valid(),
             false => true,
         }
     }
