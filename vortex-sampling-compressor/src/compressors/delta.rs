@@ -7,7 +7,7 @@ use vortex_error::VortexResult;
 use vortex_fastlanes::{delta_compress, Delta, DeltaArray, DeltaEncoding};
 
 use crate::compressors::{CompressedArray, CompressionTree, EncodingCompressor};
-use crate::SamplingCompressor;
+use crate::{constants, SamplingCompressor};
 
 #[derive(Debug)]
 pub struct DeltaCompressor;
@@ -15,6 +15,10 @@ pub struct DeltaCompressor;
 impl EncodingCompressor for DeltaCompressor {
     fn id(&self) -> &str {
         Delta::ID.as_ref()
+    }
+
+    fn cost(&self) -> u8 {
+        constants::DELTA_COST
     }
 
     fn can_compress(&self, array: &Array) -> Option<&dyn EncodingCompressor> {
@@ -50,7 +54,8 @@ impl EncodingCompressor for DeltaCompressor {
             .compress(deltas.as_ref(), like.as_ref().and_then(|l| l.child(1)))?;
 
         Ok(CompressedArray::new(
-            DeltaArray::try_new(bases.array, deltas.array, validity)?.into_array(),
+            DeltaArray::try_from_delta_compress_parts(bases.array, deltas.array, validity)?
+                .into_array(),
             Some(CompressionTree::new(self, vec![bases.path, deltas.path])),
         ))
     }

@@ -1,8 +1,7 @@
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
 
-use ahash::RandomState;
 use hashbrown::hash_map::{Entry, RawEntryMut};
-use hashbrown::HashMap;
+use hashbrown::{DefaultHashBuilder, HashMap};
 use num_traits::AsPrimitive;
 use vortex::accessor::ArrayAccessor;
 use vortex::array::{PrimitiveArray, VarBinArray};
@@ -106,7 +105,7 @@ where
     U: AsRef<[u8]>,
 {
     let (lower, _) = values.size_hint();
-    let hasher = RandomState::new();
+    let hasher = DefaultHashBuilder::default();
     let mut lookup_dict: HashMap<u64, (), ()> = HashMap::with_hasher(());
     let mut codes: Vec<u64> = Vec::with_capacity(lower);
     let mut bytes: Vec<u8> = Vec::new();
@@ -177,7 +176,6 @@ mod test {
     use vortex::accessor::ArrayAccessor;
     use vortex::array::{PrimitiveArray, VarBinArray};
     use vortex::compute::unary::scalar_at;
-    use vortex::ToArray;
     use vortex_dtype::Nullability::Nullable;
     use vortex_dtype::{DType, PType};
     use vortex_scalar::Scalar;
@@ -207,15 +205,15 @@ mod test {
         let (codes, values) = dict_encode_typed_primitive::<i32>(&arr);
         assert_eq!(codes.maybe_null_slice::<u64>(), &[1, 1, 0, 2, 2, 0, 2, 0]);
         assert_eq!(
-            scalar_at(&values.to_array(), 0).unwrap(),
+            scalar_at(&values, 0).unwrap(),
             Scalar::null(DType::Primitive(PType::I32, Nullable))
         );
         assert_eq!(
-            scalar_at(&values.to_array(), 1).unwrap(),
+            scalar_at(&values, 1).unwrap(),
             Scalar::primitive(1, Nullable)
         );
         assert_eq!(
-            scalar_at(&values.to_array(), 2).unwrap(),
+            scalar_at(&values, 2).unwrap(),
             Scalar::primitive(3, Nullable)
         );
     }

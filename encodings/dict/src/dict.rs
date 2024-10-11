@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 
 use serde::{Deserialize, Serialize};
 use vortex::accessor::ArrayAccessor;
@@ -10,30 +10,37 @@ use vortex::stats::StatsSet;
 use vortex::validity::{ArrayValidity, LogicalValidity};
 use vortex::visitor::{AcceptArrayVisitor, ArrayVisitor};
 use vortex::{
-    impl_encoding, Array, ArrayDType, ArrayDef, ArrayTrait, Canonical, IntoArray, IntoArrayVariant,
+    impl_encoding, Array, ArrayDType, ArrayTrait, Canonical, IntoArray, IntoArrayVariant,
     IntoCanonical,
 };
-use vortex_dtype::{match_each_integer_ptype, DType};
+use vortex_dtype::{match_each_integer_ptype, DType, PType};
 use vortex_error::{vortex_bail, vortex_panic, VortexExpect as _, VortexResult};
 
 impl_encoding!("vortex.dict", ids::DICT, Dict);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DictMetadata {
-    codes_dtype: DType,
+    codes_ptype: PType,
     values_len: usize,
+}
+
+impl Display for DictMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Debug::fmt(self, f)
+    }
 }
 
 impl DictArray {
     pub fn try_new(codes: Array, values: Array) -> VortexResult<Self> {
-        if !codes.dtype().is_unsigned_int() {
-            vortex_bail!(MismatchedTypes: "unsigned int", codes.dtype());
+        if !codes.dtype().is_unsigned_int() || codes.dtype().is_nullable() {
+            vortex_bail!(MismatchedTypes: "non-nullable unsigned int", codes.dtype());
         }
         Self::try_from_parts(
             values.dtype().clone(),
             codes.len(),
             DictMetadata {
-                codes_dtype: codes.dtype().clone(),
+                codes_ptype: PType::try_from(codes.dtype())
+                    .vortex_expect("codes dtype must be uint"),
                 values_len: values.len(),
             },
             [values, codes].into(),
@@ -51,7 +58,7 @@ impl DictArray {
     #[inline]
     pub fn codes(&self) -> Array {
         self.as_ref()
-            .child(1, &self.metadata().codes_dtype, self.len())
+            .child(1, &DType::from(self.metadata().codes_ptype), self.len())
             .vortex_expect("DictArray is missing its codes child array")
     }
 }
@@ -66,7 +73,7 @@ impl IntoCanonical for DictArray {
 
 impl ArrayValidity for DictArray {
     fn is_valid(&self, index: usize) -> bool {
-        let values_index = scalar_at(&self.codes(), index)
+        let values_index = scalar_at(self.codes(), index)
             .unwrap_or_else(|err| {
                 vortex_panic!(err, "Failed to get index {} from DictArray codes", index)
             })

@@ -2,6 +2,8 @@
 //!
 //! Vortex is a chunked array library that's able to
 
+use std::fmt::{Debug, Display};
+
 use futures_util::stream;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -19,7 +21,7 @@ use crate::stream::{ArrayStream, ArrayStreamAdapter};
 use crate::validity::Validity::NonNullable;
 use crate::validity::{ArrayValidity, LogicalValidity, Validity};
 use crate::visitor::{AcceptArrayVisitor, ArrayVisitor};
-use crate::{impl_encoding, Array, ArrayDType, ArrayDef, ArrayTrait, IntoArray, IntoCanonical};
+use crate::{impl_encoding, Array, ArrayDType, ArrayTrait, IntoArray, IntoCanonical};
 
 mod canonical;
 mod compute;
@@ -30,7 +32,13 @@ impl_encoding!("vortex.chunked", ids::CHUNKED, Chunked);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChunkedMetadata {
-    num_chunks: usize,
+    nchunks: usize,
+}
+
+impl Display for ChunkedMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Debug::fmt(self, f)
+    }
 }
 
 impl ChunkedArray {
@@ -52,7 +60,7 @@ impl ChunkedArray {
             })
             .collect_vec();
 
-        let num_chunks = chunk_offsets.len() - 1;
+        let nchunks = chunk_offsets.len() - 1;
         let length = *chunk_offsets.last().unwrap_or_else(|| {
             unreachable!("Chunk ends is guaranteed to have at least one element")
         }) as usize;
@@ -64,7 +72,7 @@ impl ChunkedArray {
         Self::try_from_parts(
             dtype,
             length,
-            ChunkedMetadata { num_chunks },
+            ChunkedMetadata { nchunks },
             children.into(),
             StatsSet::new(),
         )
@@ -76,8 +84,8 @@ impl ChunkedArray {
             vortex_bail!("chunk index {} > num chunks ({})", idx, self.nchunks());
         }
 
-        let chunk_start = usize::try_from(&scalar_at_unchecked(&self.chunk_offsets(), idx))?;
-        let chunk_end = usize::try_from(&scalar_at_unchecked(&self.chunk_offsets(), idx + 1))?;
+        let chunk_start = usize::try_from(&scalar_at_unchecked(self.chunk_offsets(), idx))?;
+        let chunk_end = usize::try_from(&scalar_at_unchecked(self.chunk_offsets(), idx + 1))?;
 
         // Offset the index since chunk_ends is child 0.
         self.as_ref()
@@ -85,7 +93,7 @@ impl ChunkedArray {
     }
 
     pub fn nchunks(&self) -> usize {
-        self.metadata().num_chunks
+        self.metadata().nchunks
     }
 
     #[inline]
@@ -104,7 +112,7 @@ impl ChunkedArray {
             .vortex_expect("Search sorted failed in find_chunk_idx")
             .to_ends_index(self.nchunks() + 1)
             .saturating_sub(1);
-        let chunk_start = scalar_at(&self.chunk_offsets(), index_chunk)
+        let chunk_start = scalar_at(self.chunk_offsets(), index_chunk)
             .and_then(|s| usize::try_from(&s))
             .vortex_expect("Failed to find chunk start in find_chunk_idx");
 
@@ -237,7 +245,7 @@ mod test {
 
     use crate::array::chunked::ChunkedArray;
     use crate::compute::unary::{scalar_at, subtract_scalar};
-    use crate::{assert_arrays_eq, Array, ArrayDType, IntoArray, IntoArrayVariant, ToArray};
+    use crate::{assert_arrays_eq, Array, ArrayDType, IntoArray, IntoArrayVariant};
 
     fn chunked_array() -> ChunkedArray {
         ChunkedArray::try_new(
@@ -255,7 +263,7 @@ mod test {
     fn test_scalar_subtract() {
         let chunked = chunked_array();
         let to_subtract = 1u64;
-        let array = subtract_scalar(&chunked.to_array(), &to_subtract.into()).unwrap();
+        let array = subtract_scalar(&chunked, &to_subtract.into()).unwrap();
 
         let chunked = ChunkedArray::try_from(array).unwrap();
         let mut chunks_out = chunked.chunks();

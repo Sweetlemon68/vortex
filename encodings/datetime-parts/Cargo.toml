@@ -10,12 +10,14 @@ keywords = { workspace = true }
 include = { workspace = true }
 edition = { workspace = true }
 rust-version = { workspace = true }
+categories = { workspace = true }
 readme = { workspace = true }
 
 [lints]
 workspace = true
 
 [dependencies]
+itertools = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 vortex-array = { workspace = true }

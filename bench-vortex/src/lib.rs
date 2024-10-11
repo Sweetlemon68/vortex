@@ -16,17 +16,12 @@ use simplelog::{ColorChoice, Config, TermLogger, TerminalMode};
 use vortex::array::ChunkedArray;
 use vortex::arrow::FromArrowType;
 use vortex::compress::CompressionStrategy;
-use vortex::encoding::EncodingRef;
 use vortex::{Array, Context, IntoArray};
-use vortex_alp::ALPEncoding;
-use vortex_datetime_parts::DateTimePartsEncoding;
-use vortex_dict::DictEncoding;
 use vortex_dtype::DType;
-use vortex_fastlanes::{BitPackedEncoding, FoREncoding};
-use vortex_roaring::RoaringBoolEncoding;
-use vortex_runend::RunEndEncoding;
+use vortex_fastlanes::DeltaEncoding;
 use vortex_sampling_compressor::compressors::alp::ALPCompressor;
-use vortex_sampling_compressor::compressors::bitpacked::BitPackedCompressor;
+use vortex_sampling_compressor::compressors::alp_rd::ALPRDCompressor;
+use vortex_sampling_compressor::compressors::bitpacked::BITPACK_WITH_PATCHES;
 use vortex_sampling_compressor::compressors::date_time_parts::DateTimePartsCompressor;
 use vortex_sampling_compressor::compressors::dict::DictCompressor;
 use vortex_sampling_compressor::compressors::fsst::FSSTCompressor;
@@ -50,26 +45,19 @@ pub mod tpch;
 pub mod vortex_utils;
 
 lazy_static! {
-    pub static ref CTX: Arc<Context> = Arc::new(Context::default().with_encodings([
-        &ALPEncoding as EncodingRef,
-        &DictEncoding,
-        &BitPackedEncoding,
-        &FoREncoding,
-        &DateTimePartsEncoding,
-        // &DeltaEncoding,  Blows up the search space too much.
-        &RunEndEncoding,
-        &RoaringBoolEncoding,
-        // &RoaringIntEncoding,
-        // Doesn't offer anything more than FoR really
-        // &ZigZagEncoding,
-    ]));
+    pub static ref CTX: Arc<Context> = Arc::new(
+        Context::default()
+            .with_encodings(SamplingCompressor::default().used_encodings())
+            .with_encoding(&DeltaEncoding)
+    );
 }
 
 lazy_static! {
     pub static ref COMPRESSORS: HashSet<CompressorRef<'static>> = [
         &ALPCompressor as CompressorRef<'static>,
+        &ALPRDCompressor,
         &DictCompressor,
-        &BitPackedCompressor,
+        &BITPACK_WITH_PATCHES,
         &FoRCompressor,
         &FSSTCompressor,
         &DateTimePartsCompressor,

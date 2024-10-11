@@ -17,6 +17,30 @@ pub struct PrimitiveScalar<'a> {
 }
 
 impl<'a> PrimitiveScalar<'a> {
+    pub fn try_new(dtype: &'a DType, value: &ScalarValue) -> VortexResult<Self> {
+        if !matches!(dtype, DType::Primitive(..)) {
+            vortex_bail!("Expected primitive scalar, found {}", dtype)
+        }
+
+        let ptype = PType::try_from(dtype)?;
+
+        // Read the serialized value into the correct PValue.
+        // The serialized form may come back over the wire as e.g. any integer type.
+        let pvalue = match_each_native_ptype!(ptype, |$T| {
+            if let Some(pvalue) = value.as_pvalue()? {
+                Some(PValue::from(<$T>::try_from(pvalue)?))
+            } else {
+                None
+            }
+        });
+
+        Ok(Self {
+            dtype,
+            ptype,
+            pvalue,
+        })
+    }
+
     #[inline]
     pub fn dtype(&self) -> &'a DType {
         self.dtype
@@ -59,27 +83,7 @@ impl<'a> TryFrom<&'a Scalar> for PrimitiveScalar<'a> {
     type Error = VortexError;
 
     fn try_from(value: &'a Scalar) -> Result<Self, Self::Error> {
-        if !matches!(value.dtype(), DType::Primitive(..)) {
-            vortex_bail!("Expected primitive scalar, found {}", value.dtype())
-        }
-
-        let ptype = PType::try_from(value.dtype())?;
-
-        // Read the serialized value into the correct PValue.
-        // The serialized form may come back over the wire as e.g. any integer type.
-        let pvalue = match_each_native_ptype!(ptype, |$T| {
-            if let Some(pvalue) = value.value.as_pvalue()? {
-                Some(PValue::from(<$T>::try_from(pvalue)?))
-            } else {
-                None
-            }
-        });
-
-        Ok(Self {
-            dtype: value.dtype(),
-            ptype,
-            pvalue,
-        })
+        Self::try_new(value.dtype(), value.value())
     }
 }
 
@@ -125,26 +129,6 @@ impl Scalar {
 
 macro_rules! primitive_scalar {
     ($T:ty) => {
-        impl From<$T> for Scalar {
-            fn from(value: $T) -> Self {
-                Scalar {
-                    dtype: DType::Primitive(<$T>::PTYPE, Nullability::NonNullable),
-                    value: ScalarValue::Primitive(value.into()),
-                }
-            }
-        }
-
-        impl From<Option<$T>> for Scalar {
-            fn from(value: Option<$T>) -> Self {
-                Scalar {
-                    dtype: DType::Primitive(<$T>::PTYPE, Nullability::Nullable),
-                    value: value
-                        .map(|v| ScalarValue::Primitive(v.into()))
-                        .unwrap_or_else(|| ScalarValue::Null),
-                }
-            }
-        }
-
         impl TryFrom<&Scalar> for $T {
             type Error = VortexError;
 
@@ -159,6 +143,31 @@ macro_rules! primitive_scalar {
             type Error = VortexError;
 
             fn try_from(value: Scalar) -> Result<Self, Self::Error> {
+                <$T>::try_from(&value)
+            }
+        }
+
+        impl From<$T> for ScalarValue {
+            fn from(value: $T) -> Self {
+                ScalarValue::Primitive(value.into())
+            }
+        }
+
+        impl TryFrom<&ScalarValue> for $T {
+            type Error = VortexError;
+
+            fn try_from(value: &ScalarValue) -> Result<Self, Self::Error> {
+                match value {
+                    ScalarValue::Primitive(pvalue) => <$T>::try_from(*pvalue),
+                    _ => vortex_bail!("expected primitive"),
+                }
+            }
+        }
+
+        impl TryFrom<ScalarValue> for $T {
+            type Error = VortexError;
+
+            fn try_from(value: ScalarValue) -> Result<Self, Self::Error> {
                 <$T>::try_from(&value)
             }
         }
@@ -177,22 +186,20 @@ primitive_scalar!(f16);
 primitive_scalar!(f32);
 primitive_scalar!(f64);
 
-impl From<usize> for Scalar {
-    fn from(value: usize) -> Self {
-        Self::from(value as u64)
-    }
-}
-
 /// Read a scalar as usize. For usize only, we implicitly cast for better ergonomics.
 impl TryFrom<&Scalar> for usize {
     type Error = VortexError;
 
     fn try_from(value: &Scalar) -> Result<Self, Self::Error> {
-        u64::try_from(
-            value
-                .cast(&DType::Primitive(PType::U64, Nullability::NonNullable))?
-                .as_ref(),
-        )
-        .map(|v| v as Self)
+        value.value().try_into()
+    }
+}
+
+/// Read a scalar as usize. For usize only, we implicitly cast for better ergonomics.
+impl TryFrom<&ScalarValue> for usize {
+    type Error = VortexError;
+
+    fn try_from(value: &ScalarValue) -> Result<Self, Self::Error> {
+        u64::try_from(value).map(|v| v as Self)
     }
 }

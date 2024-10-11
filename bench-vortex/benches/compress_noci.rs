@@ -1,21 +1,23 @@
-use std::fs;
 use std::io::Cursor;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
+use std::{env, fs};
 
 use arrow_array::RecordBatch;
+use arrow_schema::Schema;
 use bench_vortex::data_downloads::BenchmarkDataset;
 use bench_vortex::public_bi_data::BenchmarkDatasets;
 use bench_vortex::public_bi_data::PBIDataset::*;
 use bench_vortex::taxi_data::taxi_data_parquet;
 use bench_vortex::tpch::dbgen::{DBGen, DBGenOptions};
 use bench_vortex::{fetch_taxi_data, tpch};
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkGroup, Criterion, Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
+use regex::Regex;
 use vortex::array::{ChunkedArray, StructArray};
 use vortex::{Array, ArrayDType, IntoArray, IntoCanonical};
 use vortex_dtype::field::Field;
@@ -39,31 +41,63 @@ fn ensure_dir_exists(dir: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn parquet_written_size(array: &Array, compression: Compression) -> usize {
-    let mut buf = Cursor::new(Vec::new());
-    let chunked = ChunkedArray::try_from(array).unwrap();
+fn chunked_to_vec_record_batch(chunked: ChunkedArray) -> (Vec<RecordBatch>, Arc<Schema>) {
     let chunks_vec = chunked.chunks().collect::<Vec<_>>();
 
     if chunks_vec.is_empty() {
         panic!("empty chunks");
     }
 
-    let schema = RecordBatch::try_from(chunks_vec[0].clone())
-        .unwrap()
-        .schema();
+    let batches = chunks_vec
+        .iter()
+        .map(|x| RecordBatch::try_from(x.clone()).unwrap())
+        .collect::<Vec<_>>();
+    let schema = batches[0].schema();
+    (batches, schema)
+}
 
+fn parquet_compress(
+    batches: Vec<RecordBatch>,
+    schema: Arc<Schema>,
+    compression: Compression,
+) -> usize {
+    parquet_compress_into(batches, schema, compression, &mut Vec::new())
+}
+
+fn parquet_compress_into(
+    batches: Vec<RecordBatch>,
+    schema: Arc<Schema>,
+    compression: Compression,
+    buf: &mut Vec<u8>,
+) -> usize {
+    let mut buf = Cursor::new(buf);
     let writer_properties = WriterProperties::builder()
         .set_compression(compression)
         .build();
     let mut writer = ArrowWriter::try_new(&mut buf, schema, Some(writer_properties)).unwrap();
-    for chunk in chunks_vec {
-        let record_batch = RecordBatch::try_from(chunk).unwrap();
-        writer.write(&record_batch).unwrap();
+    for batch in batches {
+        writer.write(&batch).unwrap();
     }
     writer.flush().unwrap();
     let n_bytes = writer.bytes_written();
     writer.close().unwrap();
     n_bytes
+}
+
+fn parquet_decompress_from(buf: bytes::Bytes) -> usize {
+    let builder = ParquetRecordBatchReaderBuilder::try_new(buf).unwrap();
+    let reader = builder.build().unwrap();
+    let mut nbytes = 0;
+    for batch in reader {
+        nbytes += batch.unwrap().get_array_memory_size()
+    }
+    nbytes
+}
+
+fn parquet_written_size(array: &Array, compression: Compression) -> usize {
+    let chunked = ChunkedArray::try_from(array).unwrap();
+    let (batches, schema) = chunked_to_vec_record_batch(chunked);
+    parquet_compress(batches, schema, compression)
 }
 
 fn vortex_written_size(array: &Array) -> u64 {
@@ -83,11 +117,12 @@ fn vortex_written_size(array: &Array) -> u64 {
         .block_on(run(array))
 }
 
-fn benchmark_compress<T: criterion::measurement::Measurement, F, U>(
+fn benchmark_compress<F, U>(
+    c: &mut Criterion,
     compressor: &SamplingCompressor<'_>,
     make_uncompressed: F,
-    group_name: &str,
-    group: &mut BenchmarkGroup<'_, T>,
+    sample_size: usize,
+    measurement_time: Option<Duration>,
     bench_name: &str,
 ) where
     F: Fn() -> U,
@@ -98,98 +133,155 @@ fn benchmark_compress<T: criterion::measurement::Measurement, F, U>(
     let uncompressed_size = uncompressed.as_ref().nbytes();
     let mut compressed_size = 0;
 
-    group.throughput(Throughput::Bytes(uncompressed_size as u64));
-    group.bench_function(format!("{} compression", bench_name), |b| {
-        b.iter_with_large_drop(|| {
-            let compressed = black_box(compressor.compress(uncompressed.as_ref(), None)).unwrap();
-            compressed_size = compressed.nbytes();
+    {
+        let mut group = c.benchmark_group("compress time");
+        group.sample_size(sample_size);
+        group.throughput(Throughput::Bytes(uncompressed_size as u64));
+        measurement_time.map(|t| group.measurement_time(t));
+        group.bench_function(bench_name, |b| {
+            b.iter_with_large_drop(|| {
+                let compressed =
+                    black_box(compressor.compress(uncompressed.as_ref(), None).unwrap());
+                compressed_size = compressed.nbytes();
+            });
         });
-    });
+        group.finish();
+    }
 
-    let vortex_nbytes = vortex_written_size(
-        &compressor
-            .compress(uncompressed.as_ref(), None)
+    {
+        let mut group = c.benchmark_group("parquet_rs-zstd compress time");
+        group.sample_size(sample_size);
+        group.throughput(Throughput::Bytes(uncompressed_size as u64));
+        measurement_time.map(|t| group.measurement_time(t));
+        group.bench_function(bench_name, |b| {
+            let chunked = ChunkedArray::try_from(uncompressed.as_ref()).unwrap();
+            let (batches, schema) = chunked_to_vec_record_batch(chunked);
+            b.iter_with_large_drop(|| {
+                black_box(parquet_compress(
+                    batches.clone(),
+                    schema.clone(),
+                    Compression::ZSTD(ZstdLevel::default()),
+                ));
+            });
+        });
+        group.finish();
+    }
+
+    let (compressed_array, path) = compressor
+        .compress(uncompressed.as_ref(), None)
+        .unwrap()
+        .into_parts();
+    println!("compression path: {:#?}", path);
+    println!(
+        "compression ratio: {}",
+        compressed_size as f64 / uncompressed_size as f64
+    );
+
+    {
+        let mut group = c.benchmark_group("decompress time");
+        group.sample_size(sample_size);
+        group.throughput(Throughput::Bytes(uncompressed_size as u64));
+        measurement_time.map(|t| group.measurement_time(t));
+        group.bench_function(bench_name, |b| {
+            b.iter_batched(
+                || compressed_array.clone(),
+                |compressed| {
+                    black_box(compressed.into_canonical().unwrap().into_arrow().unwrap());
+                },
+                BatchSize::PerIteration,
+            );
+        });
+        group.finish();
+    }
+
+    {
+        let mut group = c.benchmark_group("parquet_rs-zstd decompress time");
+        group.sample_size(sample_size);
+        group.throughput(Throughput::Bytes(uncompressed_size as u64));
+        measurement_time.map(|t| group.measurement_time(t));
+        group.bench_function(bench_name, |b| {
+            let chunked = ChunkedArray::try_from(uncompressed.as_ref()).unwrap();
+            let (batches, schema) = chunked_to_vec_record_batch(chunked);
+            let mut buf = Vec::new();
+            parquet_compress_into(
+                batches.clone(),
+                schema.clone(),
+                Compression::ZSTD(ZstdLevel::default()),
+                &mut buf,
+            );
+            let bytes = bytes::Bytes::from(buf);
+            b.iter_with_large_drop(|| {
+                black_box(parquet_decompress_from(bytes.clone()));
+            });
+        });
+        group.finish();
+    }
+
+    if env::var("BENCH_VORTEX_RATIOS")
+        .ok()
+        .map(|x| Regex::new(&x).unwrap().is_match(bench_name))
+        .unwrap_or(false)
+    {
+        let vortex_nbytes = vortex_written_size(
+            &compressor
+                .compress(uncompressed.as_ref(), None)
+                .unwrap()
+                .into_array(),
+        );
+
+        let parquet_zstd_nbytes = parquet_written_size(
+            uncompressed.as_ref(),
+            Compression::ZSTD(ZstdLevel::default()),
+        );
+
+        println!(
+            "{}",
+            serde_json::to_string(&GenericBenchmarkResults {
+                name: &format!("vortex:parquet-zstd size/{}", bench_name),
+                value: (vortex_nbytes as f64) / (parquet_zstd_nbytes as f64),
+                unit: "ratio",
+                range: 0.0,
+            })
             .unwrap()
-            .into_array(),
-    );
+        );
 
-    let parquet_zstd_nbytes = parquet_written_size(
-        uncompressed.as_ref(),
-        Compression::ZSTD(ZstdLevel::default()),
-    );
+        println!(
+            "{}",
+            serde_json::to_string(&GenericBenchmarkResults {
+                name: &format!("vortex:raw size/{}", bench_name),
+                value: (compressed_size as f64) / (uncompressed_size as f64),
+                unit: "ratio",
+                range: 0.0,
+            })
+            .unwrap()
+        );
 
-    let parquet_uncompressed_nbytes =
-        parquet_written_size(uncompressed.as_ref(), Compression::UNCOMPRESSED);
-
-    println!(
-        "{}",
-        serde_json::to_string(&GenericBenchmarkResults {
-            name: &format!("{} Vortex-to-ParquetZstd Ratio/{}", group_name, bench_name),
-            value: (vortex_nbytes as f64) / (parquet_zstd_nbytes as f64),
-            unit: "ratio",
-            range: 0.0,
-        })
-        .unwrap()
-    );
-
-    println!(
-        "{}",
-        serde_json::to_string(&GenericBenchmarkResults {
-            name: &format!(
-                "{} Vortex-to-ParquetUncompressed Ratio/{}",
-                group_name, bench_name
-            ),
-            value: (vortex_nbytes as f64) / (parquet_uncompressed_nbytes as f64),
-            unit: "ratio",
-            range: 0.0,
-        })
-        .unwrap()
-    );
-
-    println!(
-        "{}",
-        serde_json::to_string(&GenericBenchmarkResults {
-            name: &format!("{} Compression Ratio/{}", group_name, bench_name),
-            value: (compressed_size as f64) / (uncompressed_size as f64),
-            unit: "ratio",
-            range: 0.0,
-        })
-        .unwrap()
-    );
-
-    println!(
-        "{}",
-        serde_json::to_string(&GenericBenchmarkResults {
-            name: &format!("{} Compression Size/{}", group_name, bench_name),
-            value: compressed_size as f64,
-            unit: "bytes",
-            range: 0.0,
-        })
-        .unwrap()
-    );
+        println!(
+            "{}",
+            serde_json::to_string(&GenericBenchmarkResults {
+                name: &format!("vortex size/{}", bench_name),
+                value: compressed_size as f64,
+                unit: "bytes",
+                range: 0.0,
+            })
+            .unwrap()
+        );
+    }
 }
 
 fn yellow_taxi_trip_data(c: &mut Criterion) {
     taxi_data_parquet();
-    let group_name = "Yellow Taxi Trip Data";
-    let mut group = c.benchmark_group(format!("{} Compression Time", group_name));
-    group.sample_size(10);
     benchmark_compress(
+        c,
         &SamplingCompressor::default(),
         fetch_taxi_data,
-        group_name,
-        &mut group,
+        10,
+        None,
         "taxi",
     );
-    group.finish()
 }
 
 fn public_bi_benchmark(c: &mut Criterion) {
-    let group_name = "Public BI";
-    let mut group = c.benchmark_group(format!("{} Compression Time", group_name));
-    group.sample_size(10);
-    // group.measurement_time(Duration::new(10, 0));
-
     for dataset_handle in [
         AirlineSentiment,
         Arade,
@@ -207,14 +299,14 @@ fn public_bi_benchmark(c: &mut Criterion) {
         let dataset = BenchmarkDatasets::PBI(dataset_handle);
 
         benchmark_compress(
+            c,
             &SamplingCompressor::default(),
             || dataset.to_vortex_array().unwrap(),
-            group_name,
-            &mut group,
+            10,
+            None,
             dataset_handle.dataset_name(),
         );
     }
-    group.finish()
 }
 
 fn tpc_h_l_comment(c: &mut Criterion) {
@@ -231,11 +323,6 @@ fn tpc_h_l_comment(c: &mut Criterion) {
 
     let compressor = SamplingCompressor::default().excluding(&FSSTCompressor);
     let compressor_fsst = SamplingCompressor::default();
-
-    let group_name = "TPC-H l_comment";
-    let mut group = c.benchmark_group(format!("{} Compression Time", group_name));
-    group.sample_size(10);
-    group.measurement_time(Duration::new(15, 0));
 
     let comment_chunks = ChunkedArray::try_from(lineitem_vortex)
         .unwrap()
@@ -254,19 +341,21 @@ fn tpc_h_l_comment(c: &mut Criterion) {
         .into_array();
 
     benchmark_compress(
+        c,
         &compressor,
         || &comments,
-        group_name,
-        &mut group,
-        "chunked-without-fsst",
+        10,
+        None,
+        "TPC-H l_comment chunked without fsst",
     );
 
     benchmark_compress(
+        c,
         &compressor_fsst,
         || &comments,
-        group_name,
-        &mut group,
-        "chunked-with-fsst",
+        10,
+        None,
+        "TPC-H l_comment chunked",
     );
 
     let comments_canonical = comments
@@ -280,14 +369,13 @@ fn tpc_h_l_comment(c: &mut Criterion) {
         ChunkedArray::try_new(vec![comments_canonical], dtype).unwrap();
 
     benchmark_compress(
+        c,
         &compressor_fsst,
         || &comments_canonical_chunked,
-        group_name,
-        &mut group,
-        "canonical-with-fsst",
+        10,
+        Some(Duration::new(15, 0)),
+        "TPC-H l_comment canonical",
     );
-
-    group.finish();
 }
 
 criterion_group!(

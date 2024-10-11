@@ -4,15 +4,16 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use fsst::Compressor;
-use vortex::array::{VarBin, VarBinView};
+use vortex::array::{VarBin, VarBinArray, VarBinView};
 use vortex::encoding::EncodingRef;
 use vortex::{ArrayDType, ArrayDef, IntoArray};
 use vortex_dtype::DType;
 use vortex_error::{vortex_bail, VortexResult};
 use vortex_fsst::{fsst_compress, fsst_train_compressor, FSSTArray, FSSTEncoding, FSST};
 
+use super::delta::DeltaCompressor;
 use super::{CompressedArray, CompressionTree, EncoderMetadata, EncodingCompressor};
-use crate::SamplingCompressor;
+use crate::{constants, SamplingCompressor};
 
 #[derive(Debug)]
 pub struct FSSTCompressor;
@@ -29,6 +30,10 @@ impl EncoderMetadata for Compressor {
 impl EncodingCompressor for FSSTCompressor {
     fn id(&self) -> &str {
         FSST::ID.as_ref()
+    }
+
+    fn cost(&self) -> u8 {
+        constants::FSST_COST
     }
 
     fn can_compress(&self, array: &vortex::Array) -> Option<&dyn EncodingCompressor> {
@@ -58,7 +63,7 @@ impl EncodingCompressor for FSSTCompressor {
         // between 2-3x depending on the text quality.
         //
         // It's not worth running a full compression step unless the array is large enough.
-        if array.nbytes() < 10 * FSST_SYMTAB_MAX_SIZE {
+        if array.nbytes() < 5 * FSST_SYMTAB_MAX_SIZE {
             return Ok(CompressedArray::uncompressed(array.clone()));
         }
 
@@ -91,18 +96,38 @@ impl EncodingCompressor for FSSTCompressor {
                 like.as_ref().and_then(|l| l.child(0)),
             )?;
 
+        let codes_varbin = VarBinArray::try_from(fsst_array.codes())?;
+        let codes_varbin_dtype = codes_varbin.dtype().clone();
+
+        let codes_offsets_compressed = ctx
+            .named("fsst_codes_offsets")
+            .excluding(self)
+            .including(&DeltaCompressor)
+            .compress(
+                &codes_varbin.offsets(),
+                like.as_ref().and_then(|l| l.child(1)),
+            )?;
+
+        let codes = VarBinArray::try_new(
+            codes_offsets_compressed.array,
+            codes_varbin.bytes(),
+            codes_varbin_dtype,
+            codes_varbin.validity(),
+        )?
+        .into_array();
+
         Ok(CompressedArray::new(
             FSSTArray::try_new(
                 fsst_array.dtype().clone(),
                 fsst_array.symbols(),
                 fsst_array.symbol_lengths(),
-                fsst_array.codes(),
+                codes,
                 uncompressed_lengths.array,
             )?
             .into_array(),
             Some(CompressionTree::new_with_metadata(
                 self,
-                vec![uncompressed_lengths.path],
+                vec![uncompressed_lengths.path, codes_offsets_compressed.path],
                 compressor,
             )),
         ))

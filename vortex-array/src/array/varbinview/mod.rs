@@ -1,4 +1,4 @@
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::{mem, slice};
@@ -20,8 +20,7 @@ use crate::stats::StatsSet;
 use crate::validity::{ArrayValidity, LogicalValidity, Validity, ValidityMetadata};
 use crate::visitor::{AcceptArrayVisitor, ArrayVisitor};
 use crate::{
-    impl_encoding, Array, ArrayDType, ArrayDef, ArrayTrait, Canonical, IntoArrayVariant,
-    IntoCanonical,
+    impl_encoding, Array, ArrayDType, ArrayTrait, Canonical, IntoArrayVariant, IntoCanonical,
 };
 
 mod accessor;
@@ -113,6 +112,12 @@ impl_encoding!("vortex.varbinview", ids::VAR_BIN_VIEW, VarBinView);
 pub struct VarBinViewMetadata {
     validity: ValidityMetadata,
     data_lens: Vec<usize>,
+}
+
+impl Display for VarBinViewMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Debug::fmt(self, f)
+    }
 }
 
 impl VarBinViewArray {
@@ -374,7 +379,7 @@ mod test {
     use crate::array::varbinview::{BinaryView, Inlined, Ref, VarBinViewArray, VIEW_SIZE};
     use crate::compute::slice;
     use crate::compute::unary::scalar_at;
-    use crate::{Canonical, IntoCanonical};
+    use crate::{Array, Canonical, IntoCanonical};
 
     #[test]
     pub fn varbin_view() {
@@ -412,7 +417,7 @@ mod test {
         let flattened = binary_arr.into_canonical().unwrap();
         assert!(matches!(flattened, Canonical::VarBin(_)));
 
-        let var_bin = flattened.into();
+        let var_bin: Array = flattened.into();
         assert_eq!(scalar_at(&var_bin, 0).unwrap(), Scalar::from("string1"));
         assert_eq!(scalar_at(&var_bin, 1).unwrap(), Scalar::from("string2"));
     }

@@ -1,3 +1,4 @@
+use std::fmt::{Debug, Display};
 use std::sync::Arc;
 
 use fsst::{Decompressor, Symbol};
@@ -8,7 +9,7 @@ use vortex::stats::{ArrayStatisticsCompute, StatsSet};
 use vortex::validity::{ArrayValidity, LogicalValidity, Validity};
 use vortex::variants::{ArrayVariants, BinaryArrayTrait, Utf8ArrayTrait};
 use vortex::visitor::AcceptArrayVisitor;
-use vortex::{impl_encoding, Array, ArrayDType, ArrayDef, ArrayTrait, IntoCanonical};
+use vortex::{impl_encoding, Array, ArrayDType, ArrayTrait, IntoCanonical};
 use vortex_dtype::{DType, Nullability, PType};
 use vortex_error::{vortex_bail, VortexExpect, VortexResult};
 
@@ -22,6 +23,12 @@ pub struct FSSTMetadata {
     symbols_len: usize,
     codes_dtype: DType,
     uncompressed_lengths_dtype: DType,
+}
+
+impl Display for FSSTMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Debug::fmt(self, f)
+    }
 }
 
 impl FSSTArray {
@@ -163,7 +170,9 @@ impl FSSTArray {
 impl AcceptArrayVisitor for FSSTArray {
     fn accept(&self, visitor: &mut dyn vortex::visitor::ArrayVisitor) -> VortexResult<()> {
         visitor.visit_child("symbols", &self.symbols())?;
-        visitor.visit_child("codes", &self.codes())
+        visitor.visit_child("symbol_lengths", &self.symbol_lengths())?;
+        visitor.visit_child("codes", &self.codes())?;
+        visitor.visit_child("uncompressed_lengths", &self.uncompressed_lengths())
     }
 }
 

@@ -74,6 +74,10 @@ impl PValue {
         }
     }
 
+    pub fn is_instance_of(&self, ptype: &PType) -> bool {
+        &self.ptype() == ptype
+    }
+
     #[allow(clippy::transmute_int_to_float, clippy::transmute_float_to_int)]
     pub fn reinterpret_cast(&self, ptype: PType) -> Self {
         if ptype == self.ptype() {
@@ -179,6 +183,7 @@ int_pvalue!(u8, U8);
 int_pvalue!(u16, U16);
 int_pvalue!(u32, U32);
 int_pvalue!(u64, U64);
+int_pvalue!(usize, U64);
 int_pvalue!(i8, I8);
 int_pvalue!(i16, I16);
 int_pvalue!(i32, I32);
@@ -233,6 +238,24 @@ macro_rules! impl_pvalue {
     };
 }
 
+impl_pvalue!(u8, U8);
+impl_pvalue!(u16, U16);
+impl_pvalue!(u32, U32);
+impl_pvalue!(u64, U64);
+impl_pvalue!(i8, I8);
+impl_pvalue!(i16, I16);
+impl_pvalue!(i32, I32);
+impl_pvalue!(i64, I64);
+impl_pvalue!(f16, F16);
+impl_pvalue!(f32, F32);
+impl_pvalue!(f64, F64);
+
+impl From<usize> for PValue {
+    fn from(value: usize) -> PValue {
+        PValue::U64(value as u64)
+    }
+}
+
 impl Display for PValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -251,14 +274,28 @@ impl Display for PValue {
     }
 }
 
-impl_pvalue!(u8, U8);
-impl_pvalue!(u16, U16);
-impl_pvalue!(u32, U32);
-impl_pvalue!(u64, U64);
-impl_pvalue!(i8, I8);
-impl_pvalue!(i16, I16);
-impl_pvalue!(i32, I32);
-impl_pvalue!(i64, I64);
-impl_pvalue!(f16, F16);
-impl_pvalue!(f32, F32);
-impl_pvalue!(f64, F64);
+#[cfg(test)]
+mod test {
+    use vortex_dtype::half::f16;
+    use vortex_dtype::PType;
+
+    use crate::PValue;
+
+    #[test]
+    pub fn test_is_instance_of() {
+        assert!(PValue::U8(10).is_instance_of(&PType::U8));
+        assert!(!PValue::U8(10).is_instance_of(&PType::U16));
+        assert!(!PValue::U8(10).is_instance_of(&PType::I8));
+        assert!(!PValue::U8(10).is_instance_of(&PType::F16));
+
+        assert!(PValue::I8(10).is_instance_of(&PType::I8));
+        assert!(!PValue::I8(10).is_instance_of(&PType::I16));
+        assert!(!PValue::I8(10).is_instance_of(&PType::U8));
+        assert!(!PValue::I8(10).is_instance_of(&PType::F16));
+
+        assert!(PValue::F16(f16::from_f32(10.0)).is_instance_of(&PType::F16));
+        assert!(!PValue::F16(f16::from_f32(10.0)).is_instance_of(&PType::F32));
+        assert!(!PValue::F16(f16::from_f32(10.0)).is_instance_of(&PType::U16));
+        assert!(!PValue::F16(f16::from_f32(10.0)).is_instance_of(&PType::I16));
+    }
+}

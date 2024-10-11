@@ -5,7 +5,7 @@ use vortex::validity::Validity;
 use vortex::{Array, ArrayDType, IntoArray, IntoArrayVariant};
 use vortex_dtype::match_each_integer_ptype;
 use vortex_error::{VortexExpect as _, VortexResult};
-use vortex_scalar::Scalar;
+use vortex_scalar::{Scalar, ScalarValue};
 
 use crate::RunEndArray;
 
@@ -25,14 +25,14 @@ impl ArrayCompute for RunEndArray {
 
 impl ScalarAtFn for RunEndArray {
     fn scalar_at(&self, index: usize) -> VortexResult<Scalar> {
-        scalar_at(&self.values(), self.find_physical_index(index)?)
+        scalar_at(self.values(), self.find_physical_index(index)?)
     }
 
     fn scalar_at_unchecked(&self, index: usize) -> Scalar {
         let idx = self
             .find_physical_index(index)
             .vortex_expect("Search must be implemented for the underlying index array");
-        scalar_at_unchecked(&self.values(), idx)
+        scalar_at_unchecked(self.values(), idx)
     }
 }
 
@@ -86,7 +86,7 @@ impl TakeFn for RunEndArray {
                     dense_nonnull_indices,
                     filtered_values,
                     length,
-                    Scalar::null(self.dtype().clone()),
+                    ScalarValue::Null,
                 )?
                 .into_array()
             }
@@ -176,7 +176,7 @@ mod test {
         let array = ree_array();
         let null_ree = RunEndArray::try_new(
             array.ends().clone(),
-            try_cast(&array.values(), &array.values().dtype().as_nullable()).unwrap(),
+            try_cast(array.values(), &array.values().dtype().as_nullable()).unwrap(),
             Validity::AllInvalid,
         )
         .unwrap();

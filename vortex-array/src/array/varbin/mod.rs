@@ -1,10 +1,10 @@
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 
 use num_traits::AsPrimitive;
 use serde::{Deserialize, Serialize};
 pub use stats::compute_stats;
 use vortex_buffer::Buffer;
-use vortex_dtype::{match_each_native_ptype, DType, NativePType, Nullability};
+use vortex_dtype::{match_each_native_ptype, DType, NativePType, Nullability, PType};
 use vortex_error::{
     vortex_bail, vortex_err, vortex_panic, VortexError, VortexExpect as _, VortexResult,
     VortexUnwrap as _,
@@ -18,7 +18,7 @@ use crate::compute::unary::scalar_at;
 use crate::encoding::ids;
 use crate::stats::StatsSet;
 use crate::validity::{Validity, ValidityMetadata};
-use crate::{impl_encoding, Array, ArrayDType, ArrayDef, ArrayTrait, IntoArrayVariant};
+use crate::{impl_encoding, Array, ArrayDType, ArrayTrait, IntoArrayVariant};
 
 mod accessor;
 mod array;
@@ -33,8 +33,14 @@ impl_encoding!("vortex.varbin", ids::VAR_BIN, VarBin);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VarBinMetadata {
     validity: ValidityMetadata,
-    offsets_dtype: DType,
+    offsets_ptype: PType,
     bytes_len: usize,
+}
+
+impl Display for VarBinMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Debug::fmt(self, f)
+    }
 }
 
 impl VarBinArray {
@@ -47,6 +53,7 @@ impl VarBinArray {
         if !offsets.dtype().is_int() || offsets.dtype().is_nullable() {
             vortex_bail!(MismatchedTypes: "non nullable int", offsets.dtype());
         }
+        let offsets_ptype = PType::try_from(offsets.dtype()).vortex_unwrap();
         if !matches!(bytes.dtype(), &DType::BYTES) {
             vortex_bail!(MismatchedTypes: "u8", bytes.dtype());
         }
@@ -61,7 +68,7 @@ impl VarBinArray {
 
         let metadata = VarBinMetadata {
             validity: validity.to_metadata(offsets.len() - 1)?,
-            offsets_dtype: offsets.dtype().clone(),
+            offsets_ptype,
             bytes_len: bytes.len(),
         };
 
@@ -78,14 +85,18 @@ impl VarBinArray {
     #[inline]
     pub fn offsets(&self) -> Array {
         self.as_ref()
-            .child(0, &self.metadata().offsets_dtype, self.len() + 1)
+            .child(
+                0,
+                &DType::Primitive(self.metadata().offsets_ptype, Nullability::NonNullable),
+                self.len() + 1,
+            )
             .vortex_expect("Missing offsets in VarBinArray")
     }
 
     pub fn first_offset<T: NativePType + for<'a> TryFrom<&'a Scalar, Error = VortexError>>(
         &self,
     ) -> VortexResult<T> {
-        scalar_at(&self.offsets(), 0)?
+        scalar_at(self.offsets(), 0)?
             .cast(&DType::from(T::PTYPE))?
             .as_ref()
             .try_into()
@@ -116,8 +127,8 @@ impl VarBinArray {
     /// Access value bytes child array limited to values that are logically present in
     /// the array unlike [bytes][Self::bytes].
     pub fn sliced_bytes(&self) -> VortexResult<Array> {
-        let first_offset: usize = scalar_at(&self.offsets(), 0)?.as_ref().try_into()?;
-        let last_offset: usize = scalar_at(&self.offsets(), self.offsets().len() - 1)?
+        let first_offset: usize = scalar_at(self.offsets(), 0)?.as_ref().try_into()?;
+        let last_offset: usize = scalar_at(self.offsets(), self.offsets().len() - 1)?
             .as_ref()
             .try_into()?;
         slice(self.bytes(), first_offset, last_offset)
@@ -157,6 +168,18 @@ impl VarBinArray {
         builder.finish(dtype)
     }
 
+    pub fn from_iter_nonnull<T: AsRef<[u8]>, I: IntoIterator<Item = T>>(
+        iter: I,
+        dtype: DType,
+    ) -> Self {
+        let iter = iter.into_iter();
+        let mut builder = VarBinBuilder::<u32>::with_capacity(iter.size_hint().0);
+        for v in iter {
+            builder.push_value(v);
+        }
+        builder.finish(dtype)
+    }
+
     pub fn offset_at(&self, index: usize) -> usize {
         PrimitiveArray::try_from(self.offsets())
             .ok()
@@ -166,7 +189,7 @@ impl VarBinArray {
                 })
             })
             .unwrap_or_else(|| {
-                scalar_at(&self.offsets(), index)
+                scalar_at(self.offsets(), index)
                     .unwrap_or_else(|err| {
                         vortex_panic!(err, "Failed to get offset at index: {}", index)
                     })

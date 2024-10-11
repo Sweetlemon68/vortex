@@ -1,3 +1,4 @@
+use std::fmt::{Debug, Display};
 use std::mem::{transmute, MaybeUninit};
 use std::ptr;
 use std::sync::Arc;
@@ -19,8 +20,7 @@ use crate::validity::{ArrayValidity, LogicalValidity, Validity, ValidityMetadata
 use crate::variants::{ArrayVariants, PrimitiveArrayTrait};
 use crate::visitor::{AcceptArrayVisitor, ArrayVisitor};
 use crate::{
-    impl_encoding, Array, ArrayDType, ArrayDef, ArrayTrait, Canonical, IntoArray, IntoCanonical,
-    TypedArray,
+    impl_encoding, Array, ArrayDType, ArrayTrait, Canonical, IntoArray, IntoCanonical, TypedArray,
 };
 
 mod accessor;
@@ -32,6 +32,12 @@ impl_encoding!("vortex.primitive", ids::PRIMITIVE, Primitive);
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PrimitiveMetadata {
     validity: ValidityMetadata,
+}
+
+impl Display for PrimitiveMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Debug::fmt(self, f)
+    }
 }
 
 impl PrimitiveArray {

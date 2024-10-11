@@ -222,7 +222,7 @@ fn varbin_to_arrow(varbin_array: VarBinArray) -> VortexResult<ArrayRef> {
         PType::U64 => offsets.reinterpret_cast(PType::I64),
         PType::U32 => offsets.reinterpret_cast(PType::I32),
         // Unless it's u64, everything else can be converted into an i32.
-        _ => try_cast(&offsets.to_array(), PType::I32.into())
+        _ => try_cast(offsets.to_array(), PType::I32.into())
             .and_then(|a| a.into_primitive())
             .map_err(|err| err.with_context("Failed to cast offsets to PrimitiveArray of i32"))?,
     };
@@ -286,8 +286,11 @@ fn varbin_to_arrow(varbin_array: VarBinArray) -> VortexResult<ArrayRef> {
 fn temporal_to_arrow(temporal_array: TemporalArray) -> VortexResult<ArrayRef> {
     macro_rules! extract_temporal_values {
         ($values:expr, $prim:ty) => {{
-            let temporal_values =
-                try_cast($values, <$prim as NativePType>::PTYPE.into())?.into_primitive()?;
+            let temporal_values = try_cast(
+                $values,
+                &DType::Primitive(<$prim as NativePType>::PTYPE, $values.dtype().nullability()),
+            )?
+            .into_primitive()?;
             let len = temporal_values.len();
             let nulls = temporal_values.logical_validity().to_null_buffer()?;
             let scalars =
@@ -455,8 +458,6 @@ mod test {
     };
     use arrow_buffer::NullBufferBuilder;
     use arrow_schema::{DataType, Field};
-    use vortex_dtype::Nullability;
-    use vortex_scalar::Scalar;
 
     use crate::array::{PrimitiveArray, SparseArray, StructArray};
     use crate::arrow::FromArrowArray;
@@ -483,7 +484,7 @@ mod test {
                         PrimitiveArray::from_vec(vec![0u64; 1], Validity::NonNullable).into_array(),
                         PrimitiveArray::from_vec(vec![100i64], Validity::NonNullable).into_array(),
                         1,
-                        Scalar::primitive(0i64, Nullability::NonNullable),
+                        0i64.into(),
                     )
                     .unwrap()
                     .into_array(),

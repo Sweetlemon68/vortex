@@ -9,7 +9,7 @@ use vortex_dtype::{
     match_each_integer_ptype, match_each_unsigned_integer_ptype, NativePType, PType,
 };
 use vortex_error::{vortex_bail, vortex_err, VortexResult, VortexUnwrap};
-use vortex_scalar::Scalar;
+use vortex_scalar::{Scalar, ScalarValue};
 
 use crate::BitPackedArray;
 
@@ -27,7 +27,7 @@ pub fn bitpack_encode(array: PrimitiveArray, bit_width: usize) -> VortexResult<B
 
     let packed = bitpack(&array, bit_width)?;
     let patches = (num_exceptions > 0)
-        .then(|| bitpack_patches(&array, bit_width, num_exceptions))
+        .then(|| gather_patches(&array, bit_width, num_exceptions))
         .flatten();
 
     BitPackedArray::try_new(
@@ -35,6 +35,30 @@ pub fn bitpack_encode(array: PrimitiveArray, bit_width: usize) -> VortexResult<B
         array.ptype(),
         array.validity(),
         patches,
+        bit_width,
+        array.len(),
+    )
+}
+
+/// Bitpack an array into the specified bit-width without checking statistics.
+///
+/// # Safety
+///
+/// It is the caller's responsibility to ensure that all values in the array can lossless pack
+/// into the specified bit-width.
+///
+/// Failure to do so will result in data loss.
+pub unsafe fn bitpack_encode_unchecked(
+    array: PrimitiveArray,
+    bit_width: usize,
+) -> VortexResult<BitPackedArray> {
+    let packed = bitpack(&array, bit_width)?;
+
+    BitPackedArray::try_new(
+        packed,
+        array.ptype(),
+        array.validity(),
+        None,
         bit_width,
         array.len(),
     )
@@ -111,7 +135,7 @@ pub fn bitpack_primitive<T: NativePType + BitPacking + ArrowNativeType>(
     Buffer::from(output)
 }
 
-pub fn bitpack_patches(
+pub fn gather_patches(
     parray: &PrimitiveArray,
     bit_width: usize,
     num_exceptions_hint: usize,
@@ -131,7 +155,7 @@ pub fn bitpack_patches(
                 indices.into_array(),
                 PrimitiveArray::from_vec(values, Validity::AllValid).into_array(),
                 parray.len(),
-                Scalar::null(parray.dtype().as_nullable()),
+                ScalarValue::Null,
             )
             .vortex_unwrap()
             .into_array()
@@ -280,6 +304,27 @@ pub unsafe fn unpack_single_primitive<T: NativePType + BitPacking>(
     unsafe { BitPacking::unchecked_unpack_single(bit_width, packed_chunk, index_in_chunk) }
 }
 
+pub fn find_min_patchless_bit_width(array: &PrimitiveArray) -> VortexResult<usize> {
+    let bit_width_freq = array
+        .statistics()
+        .compute_bit_width_freq()
+        .ok_or_else(|| vortex_err!(ComputeError: "Failed to compute bit width frequency"))?;
+
+    min_patchless_bit_width(&bit_width_freq)
+}
+
+fn min_patchless_bit_width(bit_width_freq: &[usize]) -> VortexResult<usize> {
+    if bit_width_freq.is_empty() {
+        vortex_bail!("Empty bit width frequency!");
+    }
+    Ok(bit_width_freq
+        .iter()
+        .enumerate()
+        .filter_map(|(bw, count)| (*count > 0).then_some(bw))
+        .max()
+        .unwrap_or_default())
+}
+
 pub fn find_best_bit_width(array: &PrimitiveArray) -> VortexResult<usize> {
     let bit_width_freq = array
         .statistics()
@@ -342,6 +387,7 @@ mod test {
             best_bit_width(&freq, bytes_per_exception(PType::U8)).unwrap(),
             3
         );
+        assert_eq!(min_patchless_bit_width(&freq).unwrap(), 4)
     }
 
     #[test]

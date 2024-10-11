@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use serde::{Deserialize, Serialize};
 use vortex_dtype::DType;
 use vortex_error::{VortexExpect as _, VortexResult};
@@ -7,15 +9,19 @@ use crate::stats::{ArrayStatisticsCompute, Stat, StatsSet};
 use crate::validity::{ArrayValidity, LogicalValidity, Validity};
 use crate::variants::{ArrayVariants, NullArrayTrait};
 use crate::visitor::{AcceptArrayVisitor, ArrayVisitor};
-use crate::{impl_encoding, ArrayDef, ArrayTrait, Canonical, IntoCanonical};
+use crate::{impl_encoding, ArrayTrait, Canonical, IntoCanonical};
 
 mod compute;
 
 impl_encoding!("vortex.null", ids::NULL, Null);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NullMetadata {
-    len: usize,
+pub struct NullMetadata;
+
+impl Display for NullMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NullMetadata")
+    }
 }
 
 impl NullArray {
@@ -23,7 +29,7 @@ impl NullArray {
         Self::try_from_parts(
             DType::Null,
             len,
-            NullMetadata { len },
+            NullMetadata,
             [].into(),
             StatsSet::nulls(len, &DType::Null),
         )

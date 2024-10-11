@@ -11,7 +11,9 @@ use vortex_error::VortexResult;
 use crate::SamplingCompressor;
 
 pub mod alp;
+pub mod alp_rd;
 pub mod bitpacked;
+pub mod chunked;
 pub mod constant;
 pub mod date_time_parts;
 pub mod delta;
@@ -22,14 +24,13 @@ pub mod roaring_bool;
 pub mod roaring_int;
 pub mod runend;
 pub mod sparse;
+pub mod struct_;
 pub mod zigzag;
 
 pub trait EncodingCompressor: Sync + Send + Debug {
     fn id(&self) -> &str;
 
-    fn cost(&self) -> u8 {
-        1
-    }
+    fn cost(&self) -> u8;
 
     fn can_compress(&self, array: &Array) -> Option<&dyn EncodingCompressor>;
 
@@ -143,6 +144,10 @@ impl<'a> CompressionTree<'a> {
             .map(|c| c.compress(array, Some(self.clone()), ctx.for_compressor(c)))
     }
 
+    pub fn compressor(&self) -> &dyn EncodingCompressor {
+        self.compressor
+    }
+
     /// Access the saved opaque metadata.
     ///
     /// This will consume the owned metadata, giving the caller ownership of
@@ -151,6 +156,24 @@ impl<'a> CompressionTree<'a> {
     /// The value of `T` will almost always be `EncodingCompressor`-specific.
     pub fn metadata(&mut self) -> Option<Arc<dyn EncoderMetadata>> {
         std::mem::take(&mut self.metadata)
+    }
+
+    pub fn num_descendants(&self) -> usize {
+        self.children
+            .iter()
+            .filter_map(|child| child.as_ref().map(|c| c.num_descendants() + 1))
+            .sum::<usize>()
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn into_parts(
+        self,
+    ) -> (
+        &'a dyn EncodingCompressor,
+        Vec<Option<CompressionTree<'a>>>,
+        Option<Arc<dyn EncoderMetadata>>,
+    ) {
+        (self.compressor, self.children, self.metadata)
     }
 }
 
@@ -170,6 +193,11 @@ impl<'a> CompressedArray<'a> {
     }
 
     #[inline]
+    pub fn array(&self) -> &Array {
+        &self.array
+    }
+
+    #[inline]
     pub fn into_array(self) -> Array {
         self.array
     }
@@ -182,6 +210,11 @@ impl<'a> CompressedArray<'a> {
     #[inline]
     pub fn into_path(self) -> Option<CompressionTree<'a>> {
         self.path
+    }
+
+    #[inline]
+    pub fn into_parts(self) -> (Array, Option<CompressionTree<'a>>) {
+        (self.array, self.path)
     }
 
     #[inline]

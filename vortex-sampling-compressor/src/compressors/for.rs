@@ -10,7 +10,7 @@ use vortex_error::VortexResult;
 use vortex_fastlanes::{for_compress, FoR, FoRArray, FoREncoding};
 
 use crate::compressors::{CompressedArray, CompressionTree, EncodingCompressor};
-use crate::SamplingCompressor;
+use crate::{constants, SamplingCompressor};
 
 #[derive(Debug)]
 pub struct FoRCompressor;
@@ -18,6 +18,10 @@ pub struct FoRCompressor;
 impl EncodingCompressor for FoRCompressor {
     fn id(&self) -> &str {
         FoR::ID.as_ref()
+    }
+
+    fn cost(&self) -> u8 {
+        constants::FOR_COST
     }
 
     fn can_compress(&self, array: &Array) -> Option<&dyn EncodingCompressor> {
