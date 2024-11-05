@@ -37,7 +37,7 @@ use crate::visitor::{AcceptArrayVisitor, ArrayVisitor};
 pub mod accessor;
 pub mod array;
 pub mod arrow;
-mod canonical;
+pub mod canonical;
 pub mod compress;
 pub mod compute;
 mod context;
