@@ -3,12 +3,12 @@ use std::fmt::{Display, Formatter};
 
 use arrow_ord::cmp;
 use vortex_dtype::{DType, Nullability};
-use vortex_error::{vortex_bail, VortexResult};
+use vortex_error::{vortex_bail, VortexError, VortexResult};
 use vortex_scalar::Scalar;
 
 use crate::array::Constant;
 use crate::arrow::FromArrowArray;
-use crate::{Array, ArrayDType, ArrayDef, IntoCanonical};
+use crate::{Array, ArrayDType, ArrayDef, ArrayTrait, IntoCanonical};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd)]
 pub enum Operator {
@@ -78,6 +78,15 @@ pub trait MaybeCompareFn {
     fn maybe_compare(&self, other: &Array, operator: Operator) -> Option<VortexResult<Array>>;
 }
 
+#[inline(never)]
+pub fn xinyu_compare(
+    lhs: &dyn ArrayTrait,
+    rhs: &Array,
+    operator: Operator,
+) -> std::option::Option<Result<Array, VortexError>> {
+    lhs.compare(rhs, operator)
+}
+
 pub fn compare(
     left: impl AsRef<Array>,
     right: impl AsRef<Array>,
@@ -99,11 +108,11 @@ pub fn compare(
         return compare(right, left, operator.swap());
     }
 
-    if let Some(selection) = left.with_dyn(|lhs| lhs.compare(right, operator)) {
+    if let Some(selection) = left.with_dyn(|lhs| xinyu_compare(lhs, right, operator)) {
         return selection;
     }
 
-    if let Some(selection) = right.with_dyn(|rhs| rhs.compare(left, operator.swap())) {
+    if let Some(selection) = right.with_dyn(|rhs| xinyu_compare(rhs, left, operator.swap())) {
         return selection;
     }
 
