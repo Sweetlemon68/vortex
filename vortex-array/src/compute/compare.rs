@@ -78,6 +78,7 @@ pub trait MaybeCompareFn {
     fn maybe_compare(&self, other: &Array, operator: Operator) -> Option<VortexResult<Array>>;
 }
 
+#[no_mangle]
 #[inline(never)]
 pub fn xinyu_compare(
     lhs: &dyn ArrayTrait,
