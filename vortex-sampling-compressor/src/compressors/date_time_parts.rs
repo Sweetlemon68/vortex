@@ -1,8 +1,8 @@
-use std::collections::HashSet;
-
-use vortex::array::TemporalArray;
-use vortex::encoding::EncodingRef;
-use vortex::{Array, ArrayDType, ArrayDef, IntoArray};
+use vortex_array::aliases::hash_set::HashSet;
+use vortex_array::array::TemporalArray;
+use vortex_array::encoding::EncodingRef;
+use vortex_array::stats::ArrayStatistics as _;
+use vortex_array::{Array, ArrayDType, ArrayDef, IntoArray};
 use vortex_datetime_dtype::TemporalMetadata;
 use vortex_datetime_parts::{
     split_temporal, DateTimeParts, DateTimePartsArray, DateTimePartsEncoding, TemporalParts,
@@ -57,7 +57,7 @@ impl EncodingCompressor for DateTimePartsCompressor {
         let subsecond = ctx
             .named("subsecond")
             .compress(&subseconds, like.as_ref().and_then(|l| l.child(2)))?;
-        Ok(CompressedArray::new(
+        Ok(CompressedArray::compressed(
             DateTimePartsArray::try_new(
                 array.dtype().clone(),
                 days.array,
@@ -69,6 +69,7 @@ impl EncodingCompressor for DateTimePartsCompressor {
                 self,
                 vec![days.path, seconds.path, subsecond.path],
             )),
+            Some(array.statistics()),
         ))
     }
 

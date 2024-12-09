@@ -1,8 +1,8 @@
-use vortex::accessor::ArrayAccessor;
-use vortex::array::{BoolArray, PrimitiveArray, StructArray, VarBinArray};
-use vortex::validity::{ArrayValidity, Validity};
-use vortex::variants::StructArrayTrait;
-use vortex::{Array, ArrayDType, IntoArray, IntoArrayVariant};
+use vortex_array::accessor::ArrayAccessor;
+use vortex_array::array::{BoolArray, PrimitiveArray, StructArray, VarBinViewArray};
+use vortex_array::validity::{ArrayValidity, Validity};
+use vortex_array::variants::StructArrayTrait;
+use vortex_array::{Array, ArrayDType, IntoArray, IntoArrayVariant};
 use vortex_dtype::{match_each_native_ptype, DType};
 
 pub fn slice_canonical_array(array: &Array, start: usize, stop: usize) -> Array {
@@ -46,11 +46,11 @@ pub fn slice_canonical_array(array: &Array, start: usize, stop: usize) -> Array 
             .into_array()
         }),
         DType::Utf8(_) | DType::Binary(_) => {
-            let utf8 = array.clone().into_varbin().unwrap();
+            let utf8 = array.clone().into_varbinview().unwrap();
             let values = utf8
                 .with_iterator(|iter| iter.map(|v| v.map(|u| u.to_vec())).collect::<Vec<_>>())
                 .unwrap();
-            VarBinArray::from_iter(Vec::from(&values[start..stop]), array.dtype().clone())
+            VarBinViewArray::from_iter(Vec::from(&values[start..stop]), array.dtype().clone())
                 .into_array()
         }
         DType::Struct(..) => {

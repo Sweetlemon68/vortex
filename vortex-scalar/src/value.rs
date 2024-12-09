@@ -90,7 +90,15 @@ impl ScalarValue {
                 .zip(structdt.dtypes().to_vec())
                 .all(|(v, dt)| v.is_instance_of(&dt)),
             (ScalarValue::Null, dtype) => dtype.is_nullable(),
-            (..) => false,
+            (_, DType::Extension(ext_dtype)) => self.is_instance_of(ext_dtype.storage_dtype()),
+            _ => false,
+        }
+    }
+
+    pub fn as_null(&self) -> VortexResult<()> {
+        match self {
+            Self::Null => Ok(()),
+            _ => Err(vortex_err!("Expected a Null scalar, found {:?}", self)),
         }
     }
 

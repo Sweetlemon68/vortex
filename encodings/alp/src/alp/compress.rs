@@ -1,6 +1,7 @@
-use vortex::array::{PrimitiveArray, Sparse, SparseArray};
-use vortex::validity::Validity;
-use vortex::{Array, ArrayDType, ArrayDef, IntoArray, IntoArrayVariant};
+use vortex_array::array::{PrimitiveArray, Sparse, SparseArray};
+use vortex_array::validity::Validity;
+use vortex_array::variants::PrimitiveArrayTrait;
+use vortex_array::{Array, ArrayDType, ArrayDef, IntoArray, IntoArrayVariant};
 use vortex_dtype::{NativePType, PType};
 use vortex_error::{vortex_bail, VortexExpect as _, VortexResult};
 use vortex_scalar::ScalarValue;
@@ -82,9 +83,11 @@ fn patch_decoded(array: PrimitiveArray, patches: &Array) -> VortexResult<Primiti
         Sparse::ID => {
             match_each_alp_float_ptype!(array.ptype(), |$T| {
                 let typed_patches = SparseArray::try_from(patches).unwrap();
+                let primitive_values = typed_patches.values().into_primitive()?;
                 array.patch(
                     &typed_patches.resolved_indices(),
-                    typed_patches.values().into_primitive()?.maybe_null_slice::<$T>())
+                    primitive_values.maybe_null_slice::<$T>(),
+                    primitive_values.validity())
             })
         }
         _ => vortex_bail!(
@@ -109,7 +112,7 @@ fn decompress_primitive<T: NativePType + ALPFloat>(
 mod tests {
     use core::f64;
 
-    use vortex::compute::unary::scalar_at;
+    use vortex_array::compute::unary::scalar_at;
 
     use super::*;
 

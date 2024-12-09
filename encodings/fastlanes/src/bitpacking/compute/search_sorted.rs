@@ -5,12 +5,13 @@ use std::cmp::Ordering::Greater;
 use fastlanes::BitPacking;
 use itertools::Itertools;
 use num_traits::AsPrimitive;
-use vortex::array::SparseArray;
-use vortex::compute::{
+use vortex_array::array::SparseArray;
+use vortex_array::compute::{
     search_sorted_u64, IndexOrd, Len, SearchResult, SearchSorted, SearchSortedFn, SearchSortedSide,
 };
-use vortex::validity::Validity;
-use vortex::ArrayDType;
+use vortex_array::validity::Validity;
+use vortex_array::variants::PrimitiveArrayTrait;
+use vortex_array::ArrayDType;
 use vortex_dtype::{match_each_unsigned_integer_ptype, NativePType};
 use vortex_error::{VortexError, VortexExpect as _, VortexResult};
 use vortex_scalar::Scalar;
@@ -125,9 +126,9 @@ struct BitPackedSearch<'a, T> {
     // NOTE: caching this here is important for performance, as each call to `maybe_null_slice`
     //  invokes a call to DType <> PType conversion
     packed_maybe_null_slice: &'a [T],
-    offset: usize,
+    offset: u16,
     length: usize,
-    bit_width: usize,
+    bit_width: u8,
     first_invalid_idx: usize,
 }
 
@@ -172,8 +173,8 @@ impl<T: BitPacking + NativePType> IndexOrd<T> for BitPackedSearch<'_, T> {
         let val: T = unsafe {
             unpack_single_primitive(
                 self.packed_maybe_null_slice,
-                self.bit_width,
-                idx + self.offset,
+                self.bit_width as usize,
+                idx + self.offset as usize,
             )
         };
         Some(val.compare(*elem))
@@ -188,11 +189,11 @@ impl<T> Len for BitPackedSearch<'_, T> {
 
 #[cfg(test)]
 mod test {
-    use vortex::array::PrimitiveArray;
-    use vortex::compute::{
+    use vortex_array::array::PrimitiveArray;
+    use vortex_array::compute::{
         search_sorted, search_sorted_many, slice, SearchResult, SearchSortedFn, SearchSortedSide,
     };
-    use vortex::IntoArray;
+    use vortex_array::IntoArray;
     use vortex_dtype::Nullability;
     use vortex_scalar::Scalar;
 

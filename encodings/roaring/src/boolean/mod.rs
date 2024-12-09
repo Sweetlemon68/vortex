@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 
 use arrow_buffer::{BooleanBuffer, MutableBuffer};
@@ -6,13 +5,16 @@ pub use compress::*;
 use croaring::Native;
 pub use croaring::{Bitmap, Portable};
 use serde::{Deserialize, Serialize};
-use vortex::array::BoolArray;
-use vortex::encoding::ids;
-use vortex::stats::{Stat, StatsSet};
-use vortex::validity::{ArrayValidity, LogicalValidity, Validity};
-use vortex::variants::{ArrayVariants, BoolArrayTrait};
-use vortex::visitor::{AcceptArrayVisitor, ArrayVisitor};
-use vortex::{impl_encoding, Array, ArrayTrait, Canonical, IntoArray, IntoCanonical, TypedArray};
+use vortex_array::aliases::hash_map::HashMap;
+use vortex_array::array::visitor::{AcceptArrayVisitor, ArrayVisitor};
+use vortex_array::array::BoolArray;
+use vortex_array::encoding::ids;
+use vortex_array::stats::{Stat, StatsSet};
+use vortex_array::validity::{ArrayValidity, LogicalValidity, Validity};
+use vortex_array::variants::{ArrayVariants, BoolArrayTrait};
+use vortex_array::{
+    impl_encoding, Array, ArrayTrait, Canonical, IntoArray, IntoCanonical, TypedArray,
+};
 use vortex_buffer::Buffer;
 use vortex_dtype::DType;
 use vortex_dtype::Nullability::NonNullable;
@@ -95,6 +97,11 @@ impl ArrayVariants for RoaringBoolArray {
 }
 
 impl BoolArrayTrait for RoaringBoolArray {
+    fn invert(&self) -> VortexResult<Array> {
+        RoaringBoolArray::try_new(self.bitmap().flip(0..(self.len() as u32)), self.len())
+            .map(|a| a.into_array())
+    }
+
     fn maybe_null_indices_iter<'a>(&'a self) -> Box<dyn Iterator<Item = usize> + 'a> {
         todo!()
     }
@@ -151,8 +158,8 @@ impl IntoCanonical for RoaringBoolArray {
 mod test {
     use std::iter;
 
-    use vortex::array::BoolArray;
-    use vortex::{IntoArray, IntoArrayVariant};
+    use vortex_array::array::BoolArray;
+    use vortex_array::{IntoArray, IntoArrayVariant};
 
     use crate::RoaringBoolArray;
 

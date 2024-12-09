@@ -2,7 +2,7 @@ use vortex_dtype::DType;
 use vortex_error::VortexResult;
 
 use crate::io::VortexRead;
-use crate::message_reader::MessageReader;
+use crate::messages::reader::MessageReader;
 
 /// Reader for serialized dtype messages
 pub struct DTypeReader<R: VortexRead> {
@@ -10,7 +10,7 @@ pub struct DTypeReader<R: VortexRead> {
 }
 
 impl<R: VortexRead> DTypeReader<R> {
-    /// Create new ['DTypeReader'] given readable contents
+    /// Create new [DTypeReader] given readable contents
     pub async fn new(read: R) -> VortexResult<Self> {
         Ok(Self {
             msgs: MessageReader::try_new(read).await?,

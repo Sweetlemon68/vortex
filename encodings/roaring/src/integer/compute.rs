@@ -1,7 +1,7 @@
 use croaring::Bitmap;
-use vortex::compute::unary::ScalarAtFn;
-use vortex::compute::{ArrayCompute, SliceFn};
-use vortex::{Array, IntoArray};
+use vortex_array::compute::unary::ScalarAtFn;
+use vortex_array::compute::{ArrayCompute, SliceFn};
+use vortex_array::{Array, IntoArray};
 use vortex_dtype::PType;
 use vortex_error::{vortex_err, VortexResult, VortexUnwrap as _};
 use vortex_scalar::Scalar;
@@ -54,15 +54,15 @@ impl SliceFn for RoaringIntArray {
         };
 
         bitmap.and_inplace(&Bitmap::from_range(start..=stop_inclusive));
-        Self::try_new(bitmap, self.ptype()).map(IntoArray::into_array)
+        Self::try_new(bitmap, self.cached_ptype()).map(IntoArray::into_array)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use vortex::array::PrimitiveArray;
-    use vortex::compute::slice;
-    use vortex::compute::unary::scalar_at;
+    use vortex_array::array::PrimitiveArray;
+    use vortex_array::compute::slice;
+    use vortex_array::compute::unary::scalar_at;
 
     use super::*;
 

@@ -1,11 +1,11 @@
-use std::collections::HashSet;
 use std::ops::Add;
 
 use chrono::TimeDelta;
-use vortex::array::builder::VarBinBuilder;
-use vortex::array::{BoolArray, PrimitiveArray, StructArray, TemporalArray};
-use vortex::validity::Validity;
-use vortex::{Array, ArrayDType, IntoArray};
+use vortex_array::aliases::hash_set::HashSet;
+use vortex_array::array::builder::VarBinBuilder;
+use vortex_array::array::{BoolArray, PrimitiveArray, StructArray, TemporalArray};
+use vortex_array::validity::Validity;
+use vortex_array::{Array, ArrayDType, IntoArray};
 use vortex_dtype::{DType, FieldName, FieldNames, Nullability};
 use vortex_sampling_compressor::compressors::alp::ALPCompressor;
 use vortex_sampling_compressor::compressors::date_time_parts::DateTimePartsCompressor;
@@ -21,13 +21,14 @@ use vortex_sampling_compressor::{CompressConfig, SamplingCompressor};
 
 #[cfg(test)]
 mod tests {
-    use vortex::array::{Bool, ChunkedArray, VarBin};
-    use vortex::variants::{ArrayVariants, StructArrayTrait};
-    use vortex::ArrayDef;
+    use vortex_array::array::{Bool, ChunkedArray, VarBin};
+    use vortex_array::variants::{ArrayVariants, StructArrayTrait};
+    use vortex_array::ArrayDef;
     use vortex_datetime_dtype::TimeUnit;
     use vortex_datetime_parts::DateTimeParts;
     use vortex_dict::Dict;
     use vortex_fastlanes::FoR;
+    use vortex_fsst::FSST;
     use vortex_sampling_compressor::compressors::alp_rd::ALPRDCompressor;
     use vortex_sampling_compressor::compressors::bitpacked::BITPACK_WITH_PATCHES;
     use vortex_sampling_compressor::compressors::delta::DeltaCompressor;
@@ -163,7 +164,7 @@ mod tests {
             .try_into()
             .unwrap();
         for chunk in varbin_col.chunks() {
-            assert_eq!(chunk.encoding().id(), Dict::ID);
+            assert!(chunk.encoding().id() == Dict::ID || chunk.encoding().id() == FSST::ID);
         }
 
         let binary_col: ChunkedArray = struct_array

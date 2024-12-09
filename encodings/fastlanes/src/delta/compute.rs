@@ -1,8 +1,8 @@
 use std::cmp::min;
 
-use vortex::compute::unary::ScalarAtFn;
-use vortex::compute::{slice, ArrayCompute, SliceFn};
-use vortex::{Array, IntoArray, IntoArrayVariant};
+use vortex_array::compute::unary::ScalarAtFn;
+use vortex_array::compute::{slice, ArrayCompute, SliceFn};
+use vortex_array::{Array, IntoArray, IntoArrayVariant};
 use vortex_error::{VortexExpect, VortexResult};
 use vortex_scalar::Scalar;
 
@@ -39,7 +39,7 @@ impl SliceFn for DeltaArray {
         let physical_stop = stop + self.offset();
 
         let start_chunk = physical_start / 1024;
-        let stop_chunk = (physical_stop + 1024 - 1) / 1024;
+        let stop_chunk = physical_stop.div_ceil(1024);
 
         let bases = self.bases();
         let deltas = self.deltas();
@@ -76,9 +76,9 @@ impl SliceFn for DeltaArray {
 
 #[cfg(test)]
 mod test {
-    use vortex::compute::slice;
-    use vortex::compute::unary::{scalar_at, scalar_at_unchecked};
-    use vortex::IntoArrayVariant;
+    use vortex_array::compute::slice;
+    use vortex_array::compute::unary::{scalar_at, scalar_at_unchecked};
+    use vortex_array::IntoArrayVariant;
     use vortex_error::VortexError;
 
     use super::*;

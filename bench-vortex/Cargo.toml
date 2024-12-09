@@ -29,20 +29,22 @@ arrow-select = { workspace = true }
 bytes = { workspace = true }
 bzip2 = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
-csv = { workspace = true }
-datafusion = { workspace = true }
+datafusion = { workspace = true, features = [
+    "parquet",
+    "datetime_expressions",
+] }
+datafusion-common = { workspace = true }
+datafusion-physical-plan = { workspace = true }
 enum-iterator = { workspace = true }
-flexbuffers = { workspace = true }
 futures = { workspace = true, features = ["executor"] }
 homedir = { workspace = true }
 humansize = { workspace = true }
 indicatif = { workspace = true }
 itertools = { workspace = true }
-lazy_static = { workspace = true }
 log = { workspace = true }
 mimalloc = { workspace = true }
 object_store = { workspace = true, features = ["aws"] }
-parquet = { workspace = true, features = [] }
+parquet = { workspace = true, features = ["async"] }
 prettytable-rs = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
@@ -54,28 +56,8 @@ simplelog = { workspace = true }
 tar = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 uuid = { workspace = true, features = ["v4"] }
-vortex-alp = { workspace = true }
-vortex-array = { workspace = true }
-vortex-buffer = { workspace = true }
-vortex-bytebool = { workspace = true }
+vortex = { workspace = true, features = ["object_store", "parquet"] }
 vortex-datafusion = { workspace = true }
-vortex-datetime-parts = { workspace = true }
-vortex-dict = { workspace = true }
-vortex-dtype = { workspace = true }
-vortex-error = { workspace = true, features = ["parquet"] }
-vortex-fastlanes = { workspace = true }
-vortex-fsst = { workspace = true }
-vortex-roaring = { workspace = true }
-vortex-runend = { workspace = true }
-vortex-runend-bool = { workspace = true }
-vortex-sampling-compressor = { workspace = true }
-vortex-serde = { workspace = true, features = [
-    "futures",
-    "monoio",
-    "tokio",
-    "object_store",
-] }
-vortex-zigzag = { workspace = true }
 xshell = { workspace = true }
 
 [dev-dependencies]

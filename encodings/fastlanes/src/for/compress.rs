@@ -1,9 +1,10 @@
 use itertools::Itertools;
 use num_traits::{PrimInt, WrappingAdd, WrappingSub};
-use vortex::array::{ConstantArray, PrimitiveArray, SparseArray};
-use vortex::stats::{trailing_zeros, ArrayStatistics, Stat};
-use vortex::validity::LogicalValidity;
-use vortex::{Array, ArrayDType, IntoArray, IntoArrayVariant};
+use vortex_array::array::{ConstantArray, PrimitiveArray, SparseArray};
+use vortex_array::stats::{trailing_zeros, ArrayStatistics, Stat};
+use vortex_array::validity::LogicalValidity;
+use vortex_array::variants::PrimitiveArrayTrait;
+use vortex_array::{Array, ArrayDType, IntoArray, IntoArrayVariant};
 use vortex_dtype::{match_each_integer_ptype, NativePType};
 use vortex_error::{vortex_err, VortexResult};
 use vortex_scalar::{Scalar, ScalarValue};
@@ -118,8 +119,9 @@ fn decompress_primitive<T: NativePType + WrappingAdd + PrimInt>(
 
 #[cfg(test)]
 mod test {
-    use vortex::compute::unary::ScalarAtFn;
-    use vortex::IntoArrayVariant;
+    use vortex_array::compute::unary::ScalarAtFn;
+    use vortex_array::IntoArrayVariant;
+    use vortex_dtype::Nullability;
 
     use super::*;
 
@@ -130,6 +132,41 @@ mod test {
         let compressed = FoRArray::try_from(for_compress(&array).unwrap()).unwrap();
 
         assert_eq!(u32::try_from(compressed.reference()).unwrap(), 1_000_000u32);
+    }
+
+    #[test]
+    fn test_zeros() {
+        let array = PrimitiveArray::from(vec![0i32; 10_000]);
+        assert!(array.statistics().to_set().into_iter().next().is_none());
+
+        let compressed = for_compress(&array).unwrap();
+        let constant = ConstantArray::try_from(compressed).unwrap();
+        assert_eq!(constant.scalar_value(), &ScalarValue::from(0i32));
+    }
+
+    #[test]
+    fn test_nullable_zeros() {
+        let array = PrimitiveArray::from_nullable_vec(
+            vec![Some(0i32), None]
+                .into_iter()
+                .cycle()
+                .take(10_000)
+                .collect_vec(),
+        );
+        assert!(array.statistics().to_set().into_iter().next().is_none());
+
+        let compressed = for_compress(&array).unwrap();
+        let sparse = SparseArray::try_from(compressed).unwrap();
+        assert!(sparse.statistics().to_set().into_iter().next().is_none());
+        assert_eq!(sparse.fill_value(), &ScalarValue::Null);
+        assert_eq!(
+            sparse.scalar_at(0).unwrap(),
+            Scalar::primitive(0i32, Nullability::Nullable)
+        );
+        assert_eq!(
+            sparse.scalar_at(1).unwrap(),
+            Scalar::null(sparse.dtype().clone())
+        );
     }
 
     #[test]

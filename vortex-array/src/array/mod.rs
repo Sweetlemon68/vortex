@@ -1,4 +1,8 @@
+//! All the built-in encoding schemes and arrays.
+
+#[cfg(test)]
 mod assertions;
+
 mod bool;
 mod chunked;
 mod constant;
@@ -10,6 +14,9 @@ mod sparse;
 mod struct_;
 mod varbin;
 mod varbinview;
+
+pub mod from;
+pub mod visitor;
 
 #[cfg(feature = "arbitrary")]
 pub mod arbitrary;

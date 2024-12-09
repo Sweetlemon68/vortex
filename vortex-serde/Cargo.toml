@@ -14,38 +14,44 @@ categories = { workspace = true }
 readme = "README.md"
 
 [dependencies]
-ahash = { workspace = true }
+arrow-array = { workspace = true }
+arrow-buffer = { workspace = true }
+arrow-schema = { workspace = true }
 bytes = { workspace = true }
+croaring = { workspace = true }
+compio = { workspace = true, features = ["bytes", "macros"], optional = true }
 flatbuffers = { workspace = true }
-futures = { workspace = true }
+flume = { workspace = true }
+futures = { workspace = true, features = ["std"] }
+futures-channel = { workspace = true }
+futures-executor = { workspace = true }
 futures-util = { workspace = true }
 itertools = { workspace = true }
-monoio = { workspace = true, optional = true, features = ["bytes"] }
 object_store = { workspace = true, optional = true }
-pin-project = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "fs"], optional = true }
+once_cell = { workspace = true }
+tokio = { workspace = true, features = [
+    "io-util",
+    "fs",
+    "rt-multi-thread",
+], optional = true }
 vortex-array = { workspace = true }
 vortex-buffer = { workspace = true }
 vortex-dtype = { workspace = true, features = ["flatbuffers"] }
-vortex-error = { workspace = true, features = ["object_store"] }
+vortex-error = { workspace = true }
 vortex-expr = { workspace = true }
 vortex-flatbuffers = { workspace = true, features = ["file"] }
 vortex-scalar = { workspace = true, features = ["flatbuffers"] }
 vortex-schema = { workspace = true }
 
 [dev-dependencies]
-arrow = { workspace = true, features = ["ipc"] }
 arrow-array = { workspace = true }
 arrow-ipc = { workspace = true, features = ["lz4"] }
 arrow-schema = { workspace = true }
 arrow-select = { workspace = true }
 criterion = { workspace = true, features = ["async_futures"] }
-futures-executor = { workspace = true }
-rand = { workspace = true }
-simplelog = { workspace = true }
+rstest = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-vortex-alp = { path = "../encodings/alp" }
-vortex-fastlanes = { path = "../encodings/fastlanes" }
 vortex-sampling-compressor = { path = "../vortex-sampling-compressor" }
 
 [lints]
@@ -55,8 +61,9 @@ workspace = true
 default = ["futures"]
 # default = ["futures", "monoio", "tokio"]
 futures = ["futures-util/io"]
-monoio = ["dep:monoio"]
+compio = ["dep:compio"]
 tokio = ["dep:tokio"]
+object_store = ["dep:object_store", "vortex-error/object_store"]
 
 [[bench]]
 name = "ipc_take"

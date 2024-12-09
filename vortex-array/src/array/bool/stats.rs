@@ -1,9 +1,9 @@
-use std::collections::HashMap;
-
 use arrow_buffer::BooleanBuffer;
+use itertools::Itertools;
 use vortex_dtype::{DType, Nullability};
 use vortex_error::VortexResult;
 
+use crate::aliases::hash_map::HashMap;
 use crate::array::BoolArray;
 use crate::stats::{ArrayStatisticsCompute, Stat, StatsSet};
 use crate::validity::{ArrayValidity, LogicalValidity};
@@ -44,7 +44,7 @@ impl ArrayStatisticsCompute for NullableBools<'_> {
             acc.n_nulls(first_non_null);
             self.0
                 .iter()
-                .zip(self.1.iter())
+                .zip_eq(self.1.iter())
                 .skip(first_non_null + 1)
                 .map(|(next, valid)| valid.then_some(next))
                 .for_each(|next| acc.nullable_next(next));
@@ -60,6 +60,10 @@ impl ArrayStatisticsCompute for NullableBools<'_> {
 
 impl ArrayStatisticsCompute for BooleanBuffer {
     fn compute_statistics(&self, _stat: Stat) -> VortexResult<StatsSet> {
+        if self.is_empty() {
+            return Ok(StatsSet::new());
+        }
+
         let mut stats = BoolStatsAccumulator::new(self.value(0));
         self.iter().skip(1).for_each(|next| stats.next(next));
         Ok(stats.finish())
@@ -76,7 +80,7 @@ struct BoolStatsAccumulator {
 }
 
 impl BoolStatsAccumulator {
-    fn new(first_value: bool) -> Self {
+    pub fn new(first_value: bool) -> Self {
         Self {
             prev: first_value,
             is_sorted: true,
@@ -87,7 +91,7 @@ impl BoolStatsAccumulator {
         }
     }
 
-    fn n_nulls(&mut self, n_nulls: usize) {
+    pub fn n_nulls(&mut self, n_nulls: usize) {
         self.null_count += n_nulls;
         self.len += n_nulls;
     }
@@ -121,6 +125,7 @@ impl BoolStatsAccumulator {
         StatsSet::from(HashMap::from([
             (Stat::Min, (self.true_count == self.len).into()),
             (Stat::Max, (self.true_count > 0).into()),
+            (Stat::NullCount, self.null_count.into()),
             (
                 Stat::IsConstant,
                 (self.null_count == 0 && (self.true_count == self.len || self.true_count == 0)
@@ -156,6 +161,7 @@ mod test {
         assert!(!bool_arr.statistics().compute_is_constant().unwrap());
         assert!(!bool_arr.statistics().compute_min::<bool>().unwrap());
         assert!(bool_arr.statistics().compute_max::<bool>().unwrap());
+        assert_eq!(bool_arr.statistics().compute_null_count().unwrap(), 0);
         assert_eq!(bool_arr.statistics().compute_run_count().unwrap(), 5);
         assert_eq!(bool_arr.statistics().compute_true_count().unwrap(), 4);
     }

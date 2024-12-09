@@ -28,9 +28,7 @@ workspace = true
 
 [dev-dependencies]
 criterion = { workspace = true }
-log = { workspace = true }
 rand = { workspace = true }
-simplelog = { workspace = true }
 
 [[bench]]
 name = "dict_compress"

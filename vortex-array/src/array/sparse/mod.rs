@@ -6,16 +6,17 @@ use vortex_error::{vortex_bail, vortex_panic, VortexExpect as _, VortexResult};
 use vortex_scalar::{Scalar, ScalarValue};
 
 use crate::array::constant::ConstantArray;
+use crate::array::visitor::{AcceptArrayVisitor, ArrayVisitor};
 use crate::compute::unary::scalar_at;
 use crate::compute::{search_sorted, SearchResult, SearchSortedSide};
 use crate::encoding::ids;
-use crate::stats::{ArrayStatisticsCompute, StatsSet};
+use crate::stats::{ArrayStatistics, ArrayStatisticsCompute, Stat, StatsSet};
 use crate::validity::{ArrayValidity, LogicalValidity};
-use crate::visitor::{AcceptArrayVisitor, ArrayVisitor};
+use crate::variants::PrimitiveArrayTrait;
 use crate::{impl_encoding, Array, ArrayDType, ArrayTrait, IntoArray, IntoArrayVariant};
 
+mod canonical;
 mod compute;
-mod flatten;
 mod variants;
 
 impl_encoding!("vortex.sparse", ids::SPARSE, Sparse);
@@ -26,6 +27,7 @@ pub struct SparseMetadata {
     indices_offset: usize,
     indices_len: usize,
     fill_value: ScalarValue,
+    u64_indices: bool,
 }
 
 impl Display for SparseMetadata {
@@ -51,7 +53,7 @@ impl SparseArray {
         indices_offset: usize,
         fill_value: ScalarValue,
     ) -> VortexResult<Self> {
-        if !matches!(indices.dtype(), &DType::IDX) {
+        if !matches!(indices.dtype(), &DType::IDX | &DType::IDX_32) {
             vortex_bail!("Cannot use {} as indices", indices.dtype());
         }
         if !fill_value.is_instance_of(values.dtype()) {
@@ -84,6 +86,7 @@ impl SparseArray {
                 indices_offset,
                 indices_len: indices.len(),
                 fill_value,
+                u64_indices: matches!(indices.dtype(), &DType::IDX),
             },
             [indices, values].into(),
             StatsSet::new(),
@@ -105,7 +108,15 @@ impl SparseArray {
     #[inline]
     pub fn indices(&self) -> Array {
         self.as_ref()
-            .child(0, &DType::IDX, self.metadata().indices_len)
+            .child(
+                0,
+                if self.metadata().u64_indices {
+                    &DType::IDX
+                } else {
+                    &DType::IDX_32
+                },
+                self.metadata().indices_len,
+            )
             .vortex_expect("Missing indices array in SparseArray")
     }
 
@@ -152,8 +163,20 @@ impl SparseArray {
             let min_index: usize = scalar_at(self.indices(), 0)
                 .and_then(|s| s.as_ref().try_into())
                 .vortex_expect("SparseArray indices is non-empty");
-
             min_index - self.indices_offset()
+        })
+    }
+
+    /// Return the maximum index if indices are present.
+    ///
+    /// If this sparse array has no indices (i.e. all elements are equal to fill_value)
+    /// then it returns None.
+    pub fn max_index(&self) -> Option<usize> {
+        (!self.indices().is_empty()).then(|| {
+            let max_index: usize = scalar_at(self.indices(), self.indices().len() - 1)
+                .and_then(|s| s.as_ref().try_into())
+                .vortex_expect("SparseArray indices is non-empty");
+            max_index - self.indices_offset()
         })
     }
 }
@@ -167,7 +190,28 @@ impl AcceptArrayVisitor for SparseArray {
     }
 }
 
-impl ArrayStatisticsCompute for SparseArray {}
+impl ArrayStatisticsCompute for SparseArray {
+    fn compute_statistics(&self, stat: Stat) -> VortexResult<StatsSet> {
+        let mut stats = self.values().statistics().compute_all(&[stat])?;
+        if self.len() == self.values().len() {
+            return Ok(stats);
+        }
+
+        let fill_len = self.len() - self.values().len();
+        let fill_stats = if self.fill_value().is_null() {
+            StatsSet::nulls(fill_len, self.dtype())
+        } else {
+            StatsSet::constant(self.fill_scalar(), fill_len)
+        };
+
+        if self.values().is_empty() {
+            return Ok(fill_stats);
+        }
+
+        stats.merge_unordered(&fill_stats);
+        Ok(stats)
+    }
+}
 
 impl ArrayValidity for SparseArray {
     fn is_valid(&self, index: usize) -> bool {
@@ -198,7 +242,7 @@ impl ArrayValidity for SparseArray {
                     .with_dyn(|a| a.logical_validity().into_array()),
                 self.len(),
                 self.indices_offset(),
-                false.into(),
+                true.into(),
             )
         }
         .vortex_expect("Error determining logical validity for sparse array");
@@ -224,7 +268,6 @@ mod test {
         Scalar::null(DType::Primitive(PType::I32, Nullable))
     }
 
-    #[allow(dead_code)]
     fn non_nullable_fill() -> Scalar {
         Scalar::from(42i32)
     }
@@ -381,6 +424,23 @@ mod test {
         assert_eq!(
             validity.boolean_buffer().iter().collect_vec(),
             [false, false, true, false, false, true, false, false, true, false]
+        );
+    }
+
+    #[test]
+    fn sparse_logical_validity_non_null_fill() {
+        let array = sparse_array(non_nullable_fill());
+
+        assert_eq!(
+            array
+                .with_dyn(|a| a.logical_validity())
+                .into_array()
+                .into_bool()
+                .unwrap()
+                .boolean_buffer()
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![true; 10]
         );
     }
 

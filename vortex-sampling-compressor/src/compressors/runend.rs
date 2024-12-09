@@ -1,9 +1,8 @@
-use std::collections::HashSet;
-
-use vortex::array::Primitive;
-use vortex::encoding::EncodingRef;
-use vortex::stats::ArrayStatistics;
-use vortex::{Array, ArrayDef, IntoArray};
+use vortex_array::aliases::hash_set::HashSet;
+use vortex_array::array::Primitive;
+use vortex_array::encoding::EncodingRef;
+use vortex_array::stats::ArrayStatistics;
+use vortex_array::{Array, ArrayDef, IntoArray};
 use vortex_error::VortexResult;
 use vortex_runend::compress::runend_encode;
 use vortex_runend::{RunEnd, RunEndArray, RunEndEncoding};
@@ -61,7 +60,7 @@ impl EncodingCompressor for RunEndCompressor {
             .excluding(self)
             .compress(&values.into_array(), like.as_ref().and_then(|l| l.child(1)))?;
 
-        Ok(CompressedArray::new(
+        Ok(CompressedArray::compressed(
             RunEndArray::try_new(
                 compressed_ends.array,
                 compressed_values.array,
@@ -72,6 +71,7 @@ impl EncodingCompressor for RunEndCompressor {
                 self,
                 vec![compressed_ends.path, compressed_values.path],
             )),
+            Some(array.statistics()),
         ))
     }
 

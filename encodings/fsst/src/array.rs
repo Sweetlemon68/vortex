@@ -3,13 +3,13 @@ use std::sync::Arc;
 
 use fsst::{Decompressor, Symbol};
 use serde::{Deserialize, Serialize};
-use vortex::array::VarBinArray;
-use vortex::encoding::ids;
-use vortex::stats::{ArrayStatisticsCompute, StatsSet};
-use vortex::validity::{ArrayValidity, LogicalValidity, Validity};
-use vortex::variants::{ArrayVariants, BinaryArrayTrait, Utf8ArrayTrait};
-use vortex::visitor::AcceptArrayVisitor;
-use vortex::{impl_encoding, Array, ArrayDType, ArrayTrait, IntoCanonical};
+use vortex_array::array::visitor::{AcceptArrayVisitor, ArrayVisitor};
+use vortex_array::array::{VarBin, VarBinArray};
+use vortex_array::encoding::ids;
+use vortex_array::stats::{ArrayStatisticsCompute, StatsSet};
+use vortex_array::validity::{ArrayValidity, LogicalValidity, Validity};
+use vortex_array::variants::{ArrayVariants, BinaryArrayTrait, Utf8ArrayTrait};
+use vortex_array::{impl_encoding, Array, ArrayDType, ArrayDef, ArrayTrait, IntoCanonical};
 use vortex_dtype::{DType, Nullability, PType};
 use vortex_error::{vortex_bail, VortexExpect, VortexResult};
 
@@ -71,6 +71,13 @@ impl FSSTArray {
 
         if !uncompressed_lengths.dtype().is_int() || uncompressed_lengths.dtype().is_nullable() {
             vortex_bail!(InvalidArgument: "uncompressed_lengths must have integer type and cannot be nullable");
+        }
+
+        if codes.encoding().id() != VarBin::ID {
+            vortex_bail!(
+                InvalidArgument: "codes must have varbin encoding, was {}",
+                codes.encoding().id()
+            );
         }
 
         // Check: strings must be a Binary array.
@@ -183,7 +190,7 @@ impl FSSTArray {
 }
 
 impl AcceptArrayVisitor for FSSTArray {
-    fn accept(&self, visitor: &mut dyn vortex::visitor::ArrayVisitor) -> VortexResult<()> {
+    fn accept(&self, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
         visitor.visit_child("symbols", &self.symbols())?;
         visitor.visit_child("symbol_lengths", &self.symbol_lengths())?;
         visitor.visit_child("codes", &self.codes())?;

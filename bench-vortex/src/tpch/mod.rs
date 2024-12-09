@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::fs::create_dir_all;
@@ -12,16 +11,17 @@ use datafusion::datasource::MemTable;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::{CsvReadOptions, ParquetReadOptions, SessionContext};
 use tokio::fs::OpenOptions;
+use vortex::aliases::hash_map::HashMap;
 use vortex::array::{ChunkedArray, StructArray};
 use vortex::arrow::FromArrowArray;
+use vortex::dtype::DType;
+use vortex::sampling_compressor::SamplingCompressor;
+use vortex::serde::file::{VortexFileWriter, VORTEX_FILE_EXTENSION};
 use vortex::variants::StructArrayTrait;
 use vortex::{Array, ArrayDType, IntoArray, IntoArrayVariant};
 use vortex_datafusion::memory::VortexMemTableOptions;
 use vortex_datafusion::persistent::config::{VortexFile, VortexTableOptions};
 use vortex_datafusion::SessionContextExt;
-use vortex_dtype::DType;
-use vortex_sampling_compressor::SamplingCompressor;
-use vortex_serde::layouts::LayoutWriter;
 
 use crate::{idempotent_async, CTX};
 
@@ -231,7 +231,7 @@ async fn register_vortex_file(
     create_dir_all(&vortex_dir)?;
     let output_file = &vortex_dir
         .join(file.file_name().unwrap())
-        .with_extension("vxf");
+        .with_extension(VORTEX_FILE_EXTENSION);
     let vtx_file = idempotent_async(output_file, |vtx_file| async move {
         let record_batches = session
             .read_csv(
@@ -287,7 +287,7 @@ async fn register_vortex_file(
             })
             .collect::<Vec<_>>();
 
-        let data = StructArray::from_fields(&fields).into_array();
+        let data = StructArray::from_fields(&fields)?.into_array();
 
         let data = if enable_compression {
             let compressor = SamplingCompressor::default();
@@ -303,7 +303,7 @@ async fn register_vortex_file(
             .open(&vtx_file)
             .await?;
 
-        let mut writer = LayoutWriter::new(f);
+        let mut writer = VortexFileWriter::new(f);
         writer = writer.write_array_columns(data).await?;
         writer.finalize().await?;
 

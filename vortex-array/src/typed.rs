@@ -5,8 +5,9 @@ use vortex_dtype::DType;
 use vortex_error::{vortex_bail, vortex_panic, VortexError, VortexResult};
 
 use crate::stats::StatsSet;
-use crate::{Array, ArrayData, ArrayDef, IntoArray, ToArray, TryDeserializeArrayMetadata};
+use crate::{Array, ArrayData, ArrayDef, Inner, IntoArray, ToArray, TryDeserializeArrayMetadata};
 
+/// Container for an array with all the associated implementation type information (encoding reference and ID, actual array type, metadata type).
 #[derive(Debug, Clone)]
 pub struct TypedArray<D: ArrayDef> {
     array: Array,
@@ -22,7 +23,7 @@ impl<D: ArrayDef> TypedArray<D> {
         children: Arc<[Array]>,
         stats: StatsSet,
     ) -> VortexResult<Self> {
-        let array = Array::Data(ArrayData::try_new(
+        let array = ArrayData::try_new(
             D::ENCODING,
             dtype,
             len,
@@ -30,7 +31,8 @@ impl<D: ArrayDef> TypedArray<D> {
             buffer,
             children,
             stats,
-        )?);
+        )?
+        .into();
         Ok(Self {
             array,
             lazy_metadata: OnceLock::new(),
@@ -38,8 +40,8 @@ impl<D: ArrayDef> TypedArray<D> {
     }
 
     pub fn metadata(&self) -> &D::Metadata {
-        match &self.array {
-            Array::Data(d) => d
+        match &self.array.0 {
+            Inner::Data(d) => d
                 .metadata()
                 .as_any()
                 .downcast_ref::<D::Metadata>()
@@ -51,12 +53,12 @@ impl<D: ArrayDef> TypedArray<D> {
                         D::ENCODING.id().as_ref(),
                     )
                 }),
-            Array::View(v) => self
+            Inner::View(v) => self
                 .lazy_metadata
                 .get_or_init(|| {
                     D::Metadata::try_deserialize_metadata(v.metadata()).unwrap_or_else(|err| {
                         vortex_panic!(
-                            "Failed to deserialize ArrayView metadata for typed array with ID {} and encoding {}: {}", 
+                            "Failed to deserialize ArrayView metadata for typed array with ID {} and encoding {}: {}",
                             D::ID.as_ref(),
                             D::ENCODING.id().as_ref(),
                             err

@@ -10,15 +10,15 @@ use num_traits::AsPrimitive;
 use serde::{Deserialize, Serialize};
 use vortex_buffer::Buffer;
 use vortex_dtype::{match_each_native_ptype, DType, NativePType, PType};
-use vortex_error::{vortex_bail, vortex_panic, VortexError, VortexExpect as _, VortexResult};
+use vortex_error::{vortex_bail, VortexExpect as _, VortexResult};
 
+use crate::array::visitor::{AcceptArrayVisitor, ArrayVisitor};
 use crate::elementwise::{dyn_cast_array_iter, BinaryFn, UnaryFn};
 use crate::encoding::ids;
 use crate::iter::{Accessor, AccessorRef, Batch, ITER_BATCH_SIZE};
 use crate::stats::StatsSet;
 use crate::validity::{ArrayValidity, LogicalValidity, Validity, ValidityMetadata};
 use crate::variants::{ArrayVariants, PrimitiveArrayTrait};
-use crate::visitor::{AcceptArrayVisitor, ArrayVisitor};
 use crate::{
     impl_encoding, Array, ArrayDType, ArrayTrait, Canonical, IntoArray, IntoCanonical, TypedArray,
 };
@@ -45,8 +45,9 @@ impl PrimitiveArray {
         let length = match_each_native_ptype!(ptype, |$P| {
             let (prefix, values, suffix) = unsafe { buffer.align_to::<$P>() };
             assert!(
-                prefix.is_empty() && suffix.is_empty(),
-                "buffer is not aligned"
+                prefix.is_empty() && suffix.is_empty() && (buffer.as_ptr() as usize) % std::mem::size_of::<$P>() == 0,
+                "buffer is not aligned: {:?}",
+                buffer.as_ptr()
             );
             values.len()
         });
@@ -96,13 +97,6 @@ impl PrimitiveArray {
             self.as_ref()
                 .child(0, &Validity::DTYPE, self.len())
                 .vortex_expect("PrimitiveArray: validity child")
-        })
-    }
-
-    pub fn ptype(&self) -> PType {
-        // TODO(ngates): we can't really cache this anywhere?
-        self.dtype().try_into().unwrap_or_else(|err: VortexError| {
-            vortex_panic!(err, "Failed to convert dtype {} to ptype", self.dtype())
         })
     }
 
@@ -168,19 +162,34 @@ impl PrimitiveArray {
         self,
         positions: &[P],
         values: &[T],
+        values_validity: Validity,
     ) -> VortexResult<Self> {
+        if positions.len() != values.len() {
+            vortex_bail!(
+                "Positions and values passed to patch had different lengths {} and {}",
+                positions.len(),
+                values.len()
+            );
+        }
+        if let Some(last_pos) = positions.last() {
+            if last_pos.as_() >= self.len() {
+                vortex_bail!(OutOfBounds: last_pos.as_(), 0, self.len())
+            }
+        }
+
         if self.ptype() != T::PTYPE {
             vortex_bail!(MismatchedTypes: self.dtype(), T::PTYPE)
         }
 
-        let validity = self.validity();
-
-        let mut own_values = self.into_maybe_null_slice();
-        // TODO(robert): Also patch validity
-        for (idx, value) in positions.iter().zip_eq(values.iter()) {
-            own_values[(*idx).as_()] = *value;
+        let result_validity = self
+            .validity()
+            .patch(self.len(), positions, values_validity)?;
+        let mut own_values = self.into_maybe_null_slice::<T>();
+        for (idx, value) in positions.iter().zip_eq(values) {
+            own_values[idx.as_()] = *value;
         }
-        Ok(Self::from_vec(own_values, validity))
+
+        Ok(Self::from_vec(own_values, result_validity))
     }
 
     pub fn into_buffer(self) -> Buffer {
@@ -467,6 +476,8 @@ mod tests {
     use vortex_scalar::Scalar;
 
     use super::*;
+    use crate::compute::slice;
+    use crate::IntoArrayVariant;
 
     #[test]
     fn batched_iter() {
@@ -551,5 +562,18 @@ mod tests {
         {
             assert_eq!(o.unwrap(), 3);
         }
+    }
+
+    #[test]
+    fn patch_sliced() {
+        let input = PrimitiveArray::from_vec(vec![2u32; 10], Validity::AllValid);
+        let sliced = slice(input, 2, 8).unwrap();
+        assert_eq!(
+            sliced
+                .into_primitive()
+                .unwrap()
+                .into_maybe_null_slice::<u32>(),
+            vec![2u32; 6]
+        );
     }
 }

@@ -9,7 +9,7 @@ use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties,
 };
-use vortex::Context;
+use vortex_array::Context;
 
 use crate::persistent::opener::VortexFileOpener;
 
@@ -98,7 +98,6 @@ impl ExecutionPlan for VortexExec {
             ctx: self.ctx.clone(),
             object_store,
             projection: self.file_scan_config.projection.clone(),
-            batch_size: None,
             predicate: self.predicate.clone(),
             arrow_schema,
         };

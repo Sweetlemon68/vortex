@@ -1,36 +1,23 @@
 #![feature(exit_status_error)]
 
-use std::collections::HashSet;
 use std::env::temp_dir;
 use std::fs::{create_dir_all, File};
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use arrow_array::RecordBatchReader;
 use itertools::Itertools;
-use lazy_static::lazy_static;
 use log::LevelFilter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use simplelog::{ColorChoice, Config, TermLogger, TerminalMode};
 use vortex::array::ChunkedArray;
 use vortex::arrow::FromArrowType;
 use vortex::compress::CompressionStrategy;
+use vortex::dtype::DType;
+use vortex::fastlanes::DeltaEncoding;
+use vortex::sampling_compressor::SamplingCompressor;
 use vortex::{Array, Context, IntoArray};
-use vortex_dtype::DType;
-use vortex_fastlanes::DeltaEncoding;
-use vortex_sampling_compressor::compressors::alp::ALPCompressor;
-use vortex_sampling_compressor::compressors::alp_rd::ALPRDCompressor;
-use vortex_sampling_compressor::compressors::bitpacked::BITPACK_WITH_PATCHES;
-use vortex_sampling_compressor::compressors::date_time_parts::DateTimePartsCompressor;
-use vortex_sampling_compressor::compressors::dict::DictCompressor;
-use vortex_sampling_compressor::compressors::fsst::FSSTCompressor;
-use vortex_sampling_compressor::compressors::r#for::FoRCompressor;
-use vortex_sampling_compressor::compressors::roaring_bool::RoaringBoolCompressor;
-use vortex_sampling_compressor::compressors::runend::DEFAULT_RUN_END_COMPRESSOR;
-use vortex_sampling_compressor::compressors::sparse::SparseCompressor;
-use vortex_sampling_compressor::compressors::CompressorRef;
-use vortex_sampling_compressor::SamplingCompressor;
 
 use crate::data_downloads::FileType;
 use crate::reader::BATCH_SIZE;
@@ -44,29 +31,13 @@ pub mod taxi_data;
 pub mod tpch;
 pub mod vortex_utils;
 
-lazy_static! {
-    pub static ref CTX: Arc<Context> = Arc::new(
+pub static CTX: LazyLock<Arc<Context>> = LazyLock::new(|| {
+    Arc::new(
         Context::default()
             .with_encodings(SamplingCompressor::default().used_encodings())
-            .with_encoding(&DeltaEncoding)
-    );
-}
-
-lazy_static! {
-    pub static ref COMPRESSORS: HashSet<CompressorRef<'static>> = [
-        &ALPCompressor as CompressorRef<'static>,
-        &ALPRDCompressor,
-        &DictCompressor,
-        &BITPACK_WITH_PATCHES,
-        &FoRCompressor,
-        &FSSTCompressor,
-        &DateTimePartsCompressor,
-        &DEFAULT_RUN_END_COMPRESSOR,
-        &RoaringBoolCompressor,
-        &SparseCompressor
-    ]
-    .into();
-}
+            .with_encoding(&DeltaEncoding),
+    )
+});
 
 /// Creates a file if it doesn't already exist.
 /// NB: Does NOT modify the given path to ensure that it resides in the data directory.
@@ -173,10 +144,7 @@ pub fn fetch_taxi_data() -> Array {
 }
 
 pub fn compress_taxi_data() -> Array {
-    let uncompressed = fetch_taxi_data();
-    let compressor: &dyn CompressionStrategy = &SamplingCompressor::new(COMPRESSORS.clone());
-
-    compressor.compress(&uncompressed).unwrap()
+    CompressionStrategy::compress(&SamplingCompressor::default(), &fetch_taxi_data()).unwrap()
 }
 
 pub struct CompressionRunStats {
@@ -232,11 +200,11 @@ mod test {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use vortex::arrow::FromArrowArray;
     use vortex::compress::CompressionStrategy;
+    use vortex::sampling_compressor::SamplingCompressor;
     use vortex::{Array, IntoCanonical};
-    use vortex_sampling_compressor::SamplingCompressor;
 
     use crate::taxi_data::taxi_data_parquet;
-    use crate::{compress_taxi_data, setup_logger, COMPRESSORS};
+    use crate::{compress_taxi_data, setup_logger};
 
     #[ignore]
     #[test]
@@ -269,7 +237,7 @@ mod test {
         let file = File::open(taxi_data_parquet()).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
         let reader = builder.with_limit(1).build().unwrap();
-        let compressor: &dyn CompressionStrategy = &SamplingCompressor::new(COMPRESSORS.clone());
+        let compressor: &dyn CompressionStrategy = &SamplingCompressor::default();
 
         for record_batch in reader.map(|batch_result| batch_result.unwrap()) {
             let struct_arrow: ArrowStructArray = record_batch.into();

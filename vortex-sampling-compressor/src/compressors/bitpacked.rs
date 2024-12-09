@@ -1,9 +1,9 @@
-use std::collections::HashSet;
-
-use vortex::array::PrimitiveArray;
-use vortex::encoding::EncodingRef;
-use vortex::stats::ArrayStatistics;
-use vortex::{Array, IntoArray};
+use vortex_array::aliases::hash_set::HashSet;
+use vortex_array::array::PrimitiveArray;
+use vortex_array::encoding::EncodingRef;
+use vortex_array::stats::ArrayStatistics;
+use vortex_array::variants::PrimitiveArrayTrait;
+use vortex_array::{Array, IntoArray};
 use vortex_error::{vortex_err, vortex_panic, VortexResult};
 use vortex_fastlanes::{
     bitpack, count_exceptions, find_best_bit_width, find_min_patchless_bit_width, gather_patches,
@@ -26,7 +26,7 @@ pub struct BitPackedCompressor {
 }
 
 impl BitPackedCompressor {
-    fn find_bit_width(&self, array: &PrimitiveArray) -> VortexResult<usize> {
+    fn find_bit_width(&self, array: &PrimitiveArray) -> VortexResult<u8> {
         if self.allow_patches {
             find_best_bit_width(array)
         } else {
@@ -64,7 +64,7 @@ impl EncodingCompressor for BitPackedCompressor {
         let bit_width = self.find_bit_width(&parray).ok()?;
 
         // Check that the bit width is less than the type's bit width
-        if bit_width == parray.ptype().bit_width() {
+        if bit_width == parray.ptype().bit_width() as u8 {
             return None;
         }
 
@@ -93,7 +93,7 @@ impl EncodingCompressor for BitPackedCompressor {
             )
         }
 
-        if bit_width == parray.ptype().bit_width() {
+        if bit_width == parray.ptype().bit_width() as u8 {
             // Nothing we can do
             return Ok(CompressedArray::uncompressed(array.clone()));
         }
@@ -112,7 +112,7 @@ impl EncodingCompressor for BitPackedCompressor {
             .flatten()
             .transpose()?;
 
-        Ok(CompressedArray::new(
+        Ok(CompressedArray::compressed(
             BitPackedArray::try_new(
                 packed,
                 parray.ptype(),
@@ -126,6 +126,7 @@ impl EncodingCompressor for BitPackedCompressor {
                 self,
                 vec![patches.and_then(|p| p.path)],
             )),
+            Some(array.statistics()),
         ))
     }
 

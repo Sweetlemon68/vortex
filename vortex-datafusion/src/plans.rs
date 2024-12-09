@@ -3,7 +3,7 @@
 use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::task::{Context, Poll};
 
 use arrow_array::cast::AsArray;
@@ -17,41 +17,36 @@ use datafusion_physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionMode, ExecutionPlan, PlanProperties,
 };
 use futures::{ready, Stream};
-use lazy_static::lazy_static;
 use pin_project::pin_project;
-use vortex::array::ChunkedArray;
-use vortex::arrow::FromArrowArray;
-use vortex::compute::take;
-use vortex::{Array, IntoArrayVariant, IntoCanonical};
+use vortex_array::array::ChunkedArray;
+use vortex_array::arrow::FromArrowArray;
+use vortex_array::compute::take;
+use vortex_array::{Array, IntoArrayVariant, IntoCanonical};
 use vortex_dtype::field::Field;
 use vortex_error::{vortex_err, vortex_panic, VortexError};
-use vortex_expr::VortexExpr;
+use vortex_expr::ExprRef;
 
 /// Physical plan operator that applies a set of [filters][Expr] against the input, producing a
 /// row mask that can be used downstream to force a take against the corresponding struct array
 /// chunks but for different columns.
 pub(crate) struct RowSelectorExec {
-    filter_expr: Arc<dyn VortexExpr>,
+    filter_expr: ExprRef,
     /// cached PlanProperties object. We do not make use of this.
     cached_plan_props: PlanProperties,
     /// Full array. We only access partitions of this data.
     chunked_array: ChunkedArray,
 }
 
-lazy_static! {
-    static ref ROW_SELECTOR_SCHEMA_REF: SchemaRef =
-        Arc::new(Schema::new(vec![arrow_schema::Field::new(
-            "row_idx",
-            DataType::UInt64,
-            false
-        )]));
-}
+static ROW_SELECTOR_SCHEMA_REF: LazyLock<SchemaRef> = LazyLock::new(|| {
+    Arc::new(Schema::new(vec![arrow_schema::Field::new(
+        "row_idx",
+        DataType::UInt64,
+        false,
+    )]))
+});
 
 impl RowSelectorExec {
-    pub(crate) fn try_new(
-        filter_expr: Arc<dyn VortexExpr>,
-        chunked_array: &ChunkedArray,
-    ) -> DFResult<Self> {
+    pub(crate) fn try_new(filter_expr: ExprRef, chunked_array: &ChunkedArray) -> DFResult<Self> {
         let cached_plan_props = PlanProperties::new(
             EquivalenceProperties::new(ROW_SELECTOR_SCHEMA_REF.clone()),
             Partitioning::UnknownPartitioning(1),
@@ -122,10 +117,11 @@ impl ExecutionPlan for RowSelectorExec {
             .into());
         }
 
+        let filter_projection = self.filter_expr.references().into_iter().cloned().collect();
         Ok(Box::pin(RowIndicesStream {
             chunked_array: self.chunked_array.clone(),
             chunk_idx: 0,
-            filter_projection: self.filter_expr.references().iter().cloned().collect(),
+            filter_projection,
             conjunction_expr: self.filter_expr.clone(),
         }))
     }
@@ -135,7 +131,7 @@ impl ExecutionPlan for RowSelectorExec {
 pub(crate) struct RowIndicesStream {
     chunked_array: ChunkedArray,
     chunk_idx: usize,
-    conjunction_expr: Arc<dyn VortexExpr>,
+    conjunction_expr: ExprRef,
     filter_projection: Vec<Field>,
 }
 
@@ -155,7 +151,11 @@ impl Stream for RowIndicesStream {
         // Get the unfiltered record batch.
         // Since this is a one-shot, we only want to poll the inner future once, to create the
         // initial batch for us to process.
-        let vortex_struct = next_chunk.into_struct()?.project(&this.filter_projection)?;
+        let vortex_struct = next_chunk.with_dyn(|a| {
+            a.as_struct_array()
+                .ok_or_else(|| vortex_err!("Not a struct array"))?
+                .project(&this.filter_projection)
+        })?;
 
         let selection = this
             .conjunction_expr
@@ -380,14 +380,14 @@ mod test {
     use datafusion_expr::{and, col, lit};
     use datafusion_physical_expr::create_physical_expr;
     use itertools::Itertools;
-    use vortex::array::{BoolArray, ChunkedArray, PrimitiveArray, StructArray};
-    use vortex::validity::Validity;
-    use vortex::{ArrayDType, IntoArray};
+    use vortex_array::array::{BoolArray, ChunkedArray, PrimitiveArray, StructArray};
+    use vortex_array::arrow::infer_schema;
+    use vortex_array::validity::Validity;
+    use vortex_array::{ArrayDType, IntoArray};
     use vortex_dtype::field::Field;
     use vortex_dtype::FieldName;
     use vortex_expr::datafusion::convert_expr_to_vortex;
 
-    use crate::datatype::infer_schema;
     use crate::plans::{RowIndicesStream, ROW_SELECTOR_SCHEMA_REF};
 
     #[tokio::test]
@@ -409,7 +409,7 @@ mod test {
         let chunked_array =
             ChunkedArray::try_new(vec![chunk.clone(), chunk.clone()], dtype).unwrap();
 
-        let schema = infer_schema(chunk.dtype());
+        let schema = infer_schema(chunk.dtype()).unwrap();
         let logical_expr = and((col("a")).eq(lit(2u64)), col("b").eq(lit(true)));
         let df_expr = create_physical_expr(
             &logical_expr,

@@ -1,9 +1,10 @@
 use std::fmt::{Display, Formatter};
+use std::ops::Range;
 
 use futures_util::{Stream, TryStreamExt};
-use vortex::array::ChunkedArray;
-use vortex::stream::ArrayStream;
-use vortex::Array;
+use vortex_array::array::ChunkedArray;
+use vortex_array::stream::ArrayStream;
+use vortex_array::Array;
 use vortex_buffer::Buffer;
 use vortex_dtype::DType;
 use vortex_error::VortexResult;
@@ -111,6 +112,7 @@ impl Display for ByteRange {
 
 impl ByteRange {
     pub fn new(begin: u64, end: u64) -> Self {
+        assert!(end > begin, "Buffer end must be after its beginning");
         Self { begin, end }
     }
 
@@ -120,6 +122,10 @@ impl ByteRange {
 
     pub fn is_empty(&self) -> bool {
         self.begin == self.end
+    }
+
+    pub fn to_range(&self) -> Range<usize> {
+        self.begin as usize..self.end as usize
     }
 }
 

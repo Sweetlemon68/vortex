@@ -5,9 +5,9 @@ use chrono::TimeZone as _;
 use datafusion::datasource::listing::PartitionedFile;
 use object_store::path::Path;
 use object_store::ObjectMeta;
-use vortex::Context;
+use vortex_array::Context;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct VortexFile {
     pub(crate) object_meta: ObjectMeta,
 }
@@ -32,7 +32,7 @@ impl VortexFile {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct VortexTableOptions {
     pub(crate) data_files: Vec<VortexFile>,
     pub(crate) schema: Option<SchemaRef>,

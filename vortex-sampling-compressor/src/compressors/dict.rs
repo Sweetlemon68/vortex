@@ -1,10 +1,14 @@
-use std::collections::HashSet;
-
-use vortex::array::{Primitive, PrimitiveArray, VarBin, VarBinArray};
-use vortex::encoding::EncodingRef;
-use vortex::stats::ArrayStatistics;
-use vortex::{Array, ArrayDef, IntoArray};
-use vortex_dict::{dict_encode_primitive, dict_encode_varbin, Dict, DictArray, DictEncoding};
+use vortex_array::aliases::hash_set::HashSet;
+use vortex_array::array::{
+    Primitive, PrimitiveArray, VarBin, VarBinArray, VarBinView, VarBinViewArray,
+};
+use vortex_array::encoding::EncodingRef;
+use vortex_array::stats::ArrayStatistics;
+use vortex_array::{Array, ArrayDef, IntoArray};
+use vortex_dict::{
+    dict_encode_primitive, dict_encode_varbin, dict_encode_varbinview, Dict, DictArray,
+    DictEncoding,
+};
 use vortex_error::VortexResult;
 
 use crate::compressors::{CompressedArray, CompressionTree, EncodingCompressor};
@@ -23,8 +27,10 @@ impl EncodingCompressor for DictCompressor {
     }
 
     fn can_compress(&self, array: &Array) -> Option<&dyn EncodingCompressor> {
-        // TODO(robert): Add support for VarBinView
-        if array.encoding().id() != Primitive::ID && array.encoding().id() != VarBin::ID {
+        if array.encoding().id() != Primitive::ID
+            && array.encoding().id() != VarBin::ID
+            && array.encoding().id() != VarBinView::ID
+        {
             return None;
         };
 
@@ -58,6 +64,11 @@ impl EncodingCompressor for DictCompressor {
                 let (codes, values) = dict_encode_varbin(&vb);
                 (codes.into_array(), values.into_array())
             }
+            VarBinView::ID => {
+                let vb = VarBinViewArray::try_from(array)?;
+                let (codes, values) = dict_encode_varbinview(&vb);
+                (codes.into_array(), values.into_array())
+            }
 
             _ => unreachable!("This array kind should have been filtered out"),
         };
@@ -71,9 +82,10 @@ impl EncodingCompressor for DictCompressor {
                 .compress(&values, like.as_ref().and_then(|l| l.child(1)))?,
         );
 
-        Ok(CompressedArray::new(
+        Ok(CompressedArray::compressed(
             DictArray::try_new(codes.array, values.array)?.into_array(),
             Some(CompressionTree::new(self, vec![codes.path, values.path])),
+            Some(array.statistics()),
         ))
     }
 

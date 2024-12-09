@@ -3,41 +3,44 @@ use std::sync::Arc;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::*;
-use vortex_dtype::field::Field;
-use vortex_dtype::half::f16;
-use vortex_dtype::{DType, Nullability, PType};
-use vortex_expr::{BinaryExpr, Column, Literal, Operator, VortexExpr};
-use vortex_scalar::{PValue, Scalar, ScalarValue};
+use vortex::dtype::field::Field;
+use vortex::dtype::half::f16;
+use vortex::dtype::{DType, Nullability, PType};
+use vortex::expr::{BinaryExpr, Column, ExprRef, Literal, Operator};
+use vortex::scalar::{PValue, Scalar, ScalarValue};
 
 use crate::dtype::PyDType;
 
 /// An expression describes how to filter rows when reading an array from a file.
+///
+/// .. seealso::
+///     :func:`.column`
 ///
 /// Examples
 /// ========
 ///
 /// All the examples read the following file.
 ///
-/// >>> a = vortex.encoding.array([
+/// >>> a = vortex.array([
 /// ...     {'name': 'Joseph', 'age': 25},
 /// ...     {'name': None, 'age': 31},
 /// ...     {'name': 'Angela', 'age': None},
 /// ...     {'name': 'Mikhail', 'age': 57},
 /// ...     {'name': None, 'age': None},
 /// ... ])
-/// >>> vortex.io.write(a, "a.vortex")
+/// >>> vortex.io.write_path(a, "a.vortex")
 ///
 /// Read only those rows whose age column is greater than 35:
 ///
-/// >>> e = vortex.io.read("a.vortex", row_filter = vortex.expr.column("age") > 35)
-/// >>> e.to_arrow()
+/// >>> e = vortex.io.read_path("a.vortex", row_filter = vortex.expr.column("age") > 35)
+/// >>> e.to_arrow_array()
 /// <pyarrow.lib.StructArray object at ...>
 /// -- is_valid: all not null
 /// -- child 0 type: int64
 ///   [
 ///     57
 ///   ]
-/// -- child 1 type: string
+/// -- child 1 type: string_view
 ///   [
 ///     "Mikhail"
 ///   ]
@@ -46,8 +49,8 @@ use crate::dtype::PyDType;
 /// because of the Python precedence rules for ``&``:
 ///
 /// >>> age = vortex.expr.column("age")
-/// >>> e = vortex.io.read("a.vortex", row_filter = (age > 21) & (age <= 33))
-/// >>> e.to_arrow()
+/// >>> e = vortex.io.read_path("a.vortex", row_filter = (age > 21) & (age <= 33))
+/// >>> e.to_arrow_array()
 /// <pyarrow.lib.StructArray object at ...>
 /// -- is_valid: all not null
 /// -- child 0 type: int64
@@ -55,7 +58,7 @@ use crate::dtype::PyDType;
 ///     25,
 ///     31
 ///   ]
-/// -- child 1 type: string
+/// -- child 1 type: string_view
 ///   [
 ///     "Joseph",
 ///     null
@@ -64,43 +67,63 @@ use crate::dtype::PyDType;
 /// Read only those rows whose name is `Joseph`:
 ///
 /// >>> name = vortex.expr.column("name")
-/// >>> e = vortex.io.read("a.vortex", row_filter = name == "Joseph")
-/// >>> e.to_arrow()
+/// >>> e = vortex.io.read_path("a.vortex", row_filter = name == "Joseph")
+/// >>> e.to_arrow_array()
 /// <pyarrow.lib.StructArray object at ...>
 /// -- is_valid: all not null
 /// -- child 0 type: int64
 ///   [
 ///     25
 ///   ]
-/// -- child 1 type: string
+/// -- child 1 type: string_view
 ///   [
 ///     "Joseph"
+///   ]
+///
+/// Read all the rows whose name is _not_ `Joseph`
+///
+/// >>> name = vortex.expr.column("name")
+/// >>> e = vortex.io.read_path("a.vortex", row_filter = name != "Joseph")
+/// >>> e.to_arrow_array()
+/// <pyarrow.lib.StructArray object at ...>
+/// -- is_valid: all not null
+/// -- child 0 type: int64
+///   [
+///     null,
+///     57
+///   ]
+/// -- child 1 type: string_view
+///   [
+///     "Angela",
+///     "Mikhail"
 ///   ]
 ///
 /// Read rows whose name is `Angela` or whose age is between 20 and 30, inclusive. Notice that the
-/// Angela row is excluded because its age is null. The entire row filtering expression therefore
-/// evaluates to null which is interpreted as false:
+/// Angela row is included even though its age is null. Under SQL / Kleene semantics, `true or
+/// null` is `true`.
 ///
 /// >>> name = vortex.expr.column("name")
-/// >>> e = vortex.io.read("a.vortex", row_filter = (name == "Angela") | ((age >= 20) & (age <= 30)))
-/// >>> e.to_arrow()
+/// >>> e = vortex.io.read_path("a.vortex", row_filter = (name == "Angela") | ((age >= 20) & (age <= 30)))
+/// >>> e.to_arrow_array()
 /// <pyarrow.lib.StructArray object at ...>
 /// -- is_valid: all not null
 /// -- child 0 type: int64
 ///   [
-///     25
+///     25,
+///     null
 ///   ]
-/// -- child 1 type: string
+/// -- child 1 type: string_view
 ///   [
-///     "Joseph"
+///     "Joseph",
+///     "Angela"
 ///   ]
 #[pyclass(name = "Expr", module = "vortex")]
 pub struct PyExpr {
-    inner: Arc<dyn VortexExpr>,
+    inner: ExprRef,
 }
 
 impl PyExpr {
-    pub fn unwrap(&self) -> &Arc<dyn VortexExpr> {
+    pub fn unwrap(&self) -> &ExprRef {
         &self.inner
     }
 }
@@ -113,11 +136,7 @@ fn py_binary_opeartor<'py>(
     Bound::new(
         left.py(),
         PyExpr {
-            inner: Arc::new(BinaryExpr::new(
-                left.inner.clone(),
-                operator,
-                right.borrow().inner.clone(),
-            )),
+            inner: BinaryExpr::new_expr(left.inner.clone(), operator, right.borrow().inner.clone()),
         },
     )
 }
@@ -146,6 +165,10 @@ fn coerce_expr<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyExpr>> {
 
 #[pymethods]
 impl PyExpr {
+    pub fn __str__(&self) -> String {
+        format!("{:?}", self.inner)
+    }
+
     fn __eq__<'py>(
         self_: PyRef<'py, Self>,
         right: &Bound<'py, PyAny>,
@@ -153,7 +176,7 @@ impl PyExpr {
         py_binary_opeartor(self_, Operator::Eq, coerce_expr(right)?)
     }
 
-    fn __neq__<'py>(
+    fn __ne__<'py>(
         self_: PyRef<'py, Self>,
         right: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyExpr>> {
@@ -205,7 +228,8 @@ impl PyExpr {
 
 /// A named column.
 ///
-/// See :class:`.Expr` for more examples.
+/// .. seealso::
+///     :class:`.Expr`
 ///
 /// Example
 /// =======
@@ -215,6 +239,8 @@ impl PyExpr {
 /// >>> name = vortex.expr.column("name")
 /// >>> filter = name == "Joseph"
 ///
+/// See :class:`.Expr` for more examples.
+///
 #[pyfunction]
 pub fn column<'py>(name: &Bound<'py, PyString>) -> PyResult<Bound<'py, PyExpr>> {
     let py = name.py();
@@ -222,13 +248,13 @@ pub fn column<'py>(name: &Bound<'py, PyString>) -> PyResult<Bound<'py, PyExpr>> 
     Bound::new(
         py,
         PyExpr {
-            inner: Arc::new(Column::new(Field::Name(name))),
+            inner: Column::new_expr(Field::Name(name)),
         },
     )
 }
 
 #[pyfunction]
-pub fn _literal<'py>(
+pub fn literal<'py>(
     dtype: &Bound<'py, PyDType>,
     value: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyExpr>> {
@@ -240,10 +266,7 @@ pub fn scalar<'py>(dtype: DType, value: &Bound<'py, PyAny>) -> PyResult<Bound<'p
     Bound::new(
         py,
         PyExpr {
-            inner: Arc::new(Literal::new(Scalar::new(
-                dtype.clone(),
-                scalar_value(dtype, value)?,
-            ))),
+            inner: Literal::new_expr(Scalar::new(dtype.clone(), scalar_value(dtype, value)?)),
         },
     )
 }

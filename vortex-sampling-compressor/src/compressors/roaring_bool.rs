@@ -1,8 +1,8 @@
-use std::collections::HashSet;
-
-use vortex::array::Bool;
-use vortex::encoding::EncodingRef;
-use vortex::{Array, ArrayDType, ArrayDef, IntoArray, IntoArrayVariant};
+use vortex_array::aliases::hash_set::HashSet;
+use vortex_array::array::Bool;
+use vortex_array::encoding::EncodingRef;
+use vortex_array::stats::ArrayStatistics as _;
+use vortex_array::{Array, ArrayDType, ArrayDef, IntoArray, IntoArrayVariant};
 use vortex_dtype::DType;
 use vortex_dtype::Nullability::NonNullable;
 use vortex_error::VortexResult;
@@ -47,9 +47,10 @@ impl EncodingCompressor for RoaringBoolCompressor {
         _like: Option<CompressionTree<'a>>,
         _ctx: SamplingCompressor<'a>,
     ) -> VortexResult<CompressedArray<'a>> {
-        Ok(CompressedArray::new(
+        Ok(CompressedArray::compressed(
             roaring_bool_encode(array.clone().into_bool()?)?.into_array(),
             Some(CompressionTree::flat(self)),
+            Some(array.statistics()),
         ))
     }
 

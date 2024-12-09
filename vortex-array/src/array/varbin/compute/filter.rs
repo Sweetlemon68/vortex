@@ -7,7 +7,7 @@ use crate::array::varbin::builder::VarBinBuilder;
 use crate::array::varbin::VarBinArray;
 use crate::compute::FilterFn;
 use crate::validity::Validity;
-use crate::variants::BoolArrayTrait;
+use crate::variants::{BoolArrayTrait, PrimitiveArrayTrait};
 use crate::{Array, ArrayDType, IntoArray, IntoArrayVariant};
 
 impl FilterFn for VarBinArray {
@@ -38,7 +38,7 @@ fn filter_select_var_bin_by_slice(
     predicate: &dyn BoolArrayTrait,
     selection_count: usize,
 ) -> VortexResult<VarBinArray> {
-    let offsets = values.offsets().as_primitive();
+    let offsets = values.offsets().into_primitive()?;
     match_each_integer_ptype!(offsets.ptype(), |$O| {
         filter_select_var_bin_by_slice_primitive_offset(
             values.dtype().clone(),
@@ -137,7 +137,7 @@ fn filter_select_var_bin_by_index(
     predicate: &dyn BoolArrayTrait,
     selection_count: usize,
 ) -> VortexResult<VarBinArray> {
-    let offsets = values.offsets().as_primitive();
+    let offsets = values.offsets().into_primitive()?;
     match_each_integer_ptype!(offsets.ptype(), |$O| {
         filter_select_var_bin_by_index_primitive_offset(
             values.dtype().clone(),

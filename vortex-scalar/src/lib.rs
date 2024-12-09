@@ -12,6 +12,7 @@ mod datafusion;
 mod display;
 mod extension;
 mod list;
+mod null;
 mod primitive;
 mod pvalue;
 mod scalar_type;
@@ -32,6 +33,7 @@ pub use utf8::*;
 pub use value::*;
 use vortex_error::{vortex_bail, VortexResult};
 
+/// A single logical item, composed of both a [`ScalarValue`] and a logical [`DType`].
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct Scalar {
@@ -52,6 +54,11 @@ impl Scalar {
     #[inline]
     pub fn value(&self) -> &ScalarValue {
         &self.value
+    }
+
+    #[inline]
+    pub fn into_parts(self) -> (DType, ScalarValue) {
+        (self.dtype, self.value)
     }
 
     #[inline]
@@ -95,7 +102,19 @@ impl Scalar {
             DType::Binary(_) => BinaryScalar::try_from(self).and_then(|s| s.cast(dtype)),
             DType::Struct(..) => StructScalar::try_from(self).and_then(|s| s.cast(dtype)),
             DType::List(..) => ListScalar::try_from(self).and_then(|s| s.cast(dtype)),
-            DType::Extension(..) => ExtScalar::try_from(self).and_then(|s| s.cast(dtype)),
+            DType::Extension(ext_dtype) => {
+                if !self.value().is_instance_of(ext_dtype.storage_dtype()) {
+                    vortex_bail!(
+                        "Failed to cast scalar to extension dtype with storage type {:?}, found {:?}",
+                        ext_dtype.storage_dtype(),
+                        self.dtype()
+                    );
+                }
+                Ok(Scalar::extension(
+                    ext_dtype.clone(),
+                    self.cast(ext_dtype.storage_dtype())?.value,
+                ))
+            }
         }
     }
 }

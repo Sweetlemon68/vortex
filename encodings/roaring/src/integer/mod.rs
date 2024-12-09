@@ -3,14 +3,14 @@ use std::fmt::{Debug, Display};
 pub use compress::*;
 use croaring::{Bitmap, Portable};
 use serde::{Deserialize, Serialize};
-use vortex::array::PrimitiveArray;
-use vortex::compute::unary::try_cast;
-use vortex::encoding::ids;
-use vortex::stats::{ArrayStatistics, ArrayStatisticsCompute, Stat, StatsSet};
-use vortex::validity::{ArrayValidity, LogicalValidity, Validity};
-use vortex::variants::{ArrayVariants, PrimitiveArrayTrait};
-use vortex::visitor::{AcceptArrayVisitor, ArrayVisitor};
-use vortex::{
+use vortex_array::array::visitor::{AcceptArrayVisitor, ArrayVisitor};
+use vortex_array::array::PrimitiveArray;
+use vortex_array::compute::unary::try_cast;
+use vortex_array::encoding::ids;
+use vortex_array::stats::{ArrayStatistics, ArrayStatisticsCompute, Stat, StatsSet};
+use vortex_array::validity::{ArrayValidity, LogicalValidity, Validity};
+use vortex_array::variants::{ArrayVariants, PrimitiveArrayTrait};
+use vortex_array::{
     impl_encoding, Array, ArrayDType as _, ArrayTrait, Canonical, IntoArray, IntoCanonical,
     TypedArray,
 };
@@ -43,9 +43,14 @@ impl RoaringIntArray {
 
         let length = bitmap.statistics().cardinality as usize;
         let max = bitmap.maximum();
-        if max.map(|mv| mv as u64 > ptype.max_value()).unwrap_or(false) {
+        if max
+            .map(|mv| mv as u64 > ptype.max_value_as_u64())
+            .unwrap_or(false)
+        {
             vortex_bail!(
-                "RoaringInt maximum value is greater than the maximum value for the primitive type"
+                "Bitmap's maximum value ({}) is greater than the maximum value for the primitive type ({})",
+                max.vortex_expect("Bitmap has no maximum value despite having just checked"),
+                ptype
             );
         }
 
@@ -78,7 +83,7 @@ impl RoaringIntArray {
         )
     }
 
-    pub fn ptype(&self) -> PType {
+    pub fn cached_ptype(&self) -> PType {
         self.metadata().ptype
     }
 

@@ -1,20 +1,18 @@
 use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
-use vortex::array::PrimitiveArray;
-use vortex::encoding::ids;
-use vortex::stats::{ArrayStatisticsCompute, StatsSet};
-use vortex::validity::{ArrayValidity, LogicalValidity};
-use vortex::variants::{ArrayVariants, PrimitiveArrayTrait};
-use vortex::visitor::{AcceptArrayVisitor, ArrayVisitor};
-use vortex::{
+use vortex_array::array::visitor::{AcceptArrayVisitor, ArrayVisitor};
+use vortex_array::array::PrimitiveArray;
+use vortex_array::encoding::ids;
+use vortex_array::stats::{ArrayStatisticsCompute, StatsSet};
+use vortex_array::validity::{ArrayValidity, LogicalValidity};
+use vortex_array::variants::{ArrayVariants, PrimitiveArrayTrait};
+use vortex_array::{
     impl_encoding, Array, ArrayDType, ArrayTrait, Canonical, IntoArray, IntoArrayVariant,
     IntoCanonical,
 };
 use vortex_dtype::{DType, PType};
-use vortex_error::{
-    vortex_bail, vortex_err, vortex_panic, VortexExpect as _, VortexResult, VortexUnwrap as _,
-};
+use vortex_error::{vortex_bail, vortex_err, vortex_panic, VortexExpect as _, VortexResult};
 
 use crate::compress::zigzag_encode;
 use crate::zigzag_decode;
@@ -61,10 +59,6 @@ impl ZigZagArray {
         self.as_ref()
             .child(0, &encoded, self.len())
             .vortex_expect("ZigZagArray is missing its encoded child array")
-    }
-
-    pub fn ptype(&self) -> PType {
-        PType::try_from(self.dtype()).vortex_unwrap()
     }
 }
 

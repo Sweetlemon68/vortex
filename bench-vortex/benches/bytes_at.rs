@@ -7,12 +7,13 @@ use std::sync::Arc;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use futures::executor::block_on;
 use futures::StreamExt;
-use vortex::array::{PrimitiveArray, VarBinArray};
+use vortex::array::{PrimitiveArray, VarBinArray, VarBinViewArray};
+use vortex::buffer::Buffer;
+use vortex::dtype::{DType, Nullability};
+use vortex::serde::stream_reader::StreamArrayReader;
+use vortex::serde::stream_writer::StreamArrayWriter;
 use vortex::validity::Validity;
 use vortex::{Context, IntoArray, IntoCanonical};
-use vortex_dtype::{DType, Nullability};
-use vortex_serde::stream_reader::StreamArrayReader;
-use vortex_serde::stream_writer::StreamArrayWriter;
 
 fn array_data_fixture() -> VarBinArray {
     VarBinArray::try_new(
@@ -24,12 +25,14 @@ fn array_data_fixture() -> VarBinArray {
     .unwrap()
 }
 
-fn array_view_fixture() -> VarBinArray {
+fn array_view_fixture() -> VarBinViewArray {
     let array_data = array_data_fixture();
     let mut buffer = Vec::new();
 
     let writer = StreamArrayWriter::new(&mut buffer);
     block_on(writer.write_array(array_data.into_array())).unwrap();
+
+    let buffer = Buffer::from(buffer);
 
     let ctx = Arc::new(Context::default());
     let reader = block_on(StreamArrayReader::try_new(Cursor::new(buffer), ctx.clone())).unwrap();
@@ -42,7 +45,7 @@ fn array_view_fixture() -> VarBinArray {
         .unwrap()
         .into_canonical()
         .unwrap()
-        .into_varbin()
+        .into_varbinview()
         .unwrap()
 }
 

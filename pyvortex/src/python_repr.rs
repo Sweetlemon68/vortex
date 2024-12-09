@@ -2,7 +2,7 @@ use std::convert::AsRef;
 use std::fmt::{Display, Formatter};
 
 use itertools::Itertools;
-use vortex_dtype::{DType, ExtID, ExtMetadata, Nullability, PType};
+use vortex::dtype::{DType, ExtID, ExtMetadata, Nullability, PType};
 
 pub trait PythonRepr {
     fn python_repr(&self) -> impl Display;
@@ -12,25 +12,25 @@ struct DTypePythonRepr<'a>(&'a DType);
 
 impl PythonRepr for DType {
     fn python_repr(&self) -> impl Display {
-        return DTypePythonRepr(self);
+        DTypePythonRepr(self)
     }
 }
 
 impl Display for DTypePythonRepr<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let DTypePythonRepr(x) = self;
-        match x {
+        let DTypePythonRepr(dtype) = self;
+        match dtype {
             DType::Null => write!(f, "null()"),
             DType::Bool(n) => write!(f, "bool({})", n.python_repr()),
-            DType::Primitive(p, n) => match p {
+            DType::Primitive(ptype, n) => match ptype {
                 PType::U8 | PType::U16 | PType::U32 | PType::U64 => {
-                    write!(f, "uint({}, {})", p.bit_width(), n.python_repr())
+                    write!(f, "uint({}, {})", ptype.bit_width(), n.python_repr())
                 }
                 PType::I8 | PType::I16 | PType::I32 | PType::I64 => {
-                    write!(f, "int({}, {})", p.bit_width(), n.python_repr())
+                    write!(f, "int({}, {})", ptype.bit_width(), n.python_repr())
                 }
                 PType::F16 | PType::F32 | PType::F64 => {
-                    write!(f, "float({}, {})", p.bit_width(), n.python_repr())
+                    write!(f, "float({}, {})", ptype.bit_width(), n.python_repr())
                 }
             },
             DType::Utf8(n) => write!(f, "utf8({})", n.python_repr()),
@@ -45,14 +45,19 @@ impl Display for DTypePythonRepr<'_> {
                     .join(", "),
                 n.python_repr()
             ),
-            DType::List(c, n) => write!(f, "list({}, {})", c.python_repr(), n.python_repr()),
-            DType::Extension(ext, n) => {
-                write!(f, "ext(\"{}\", ", ext.id().python_repr())?;
+            DType::List(edt, n) => write!(f, "list({}, {})", edt.python_repr(), n.python_repr()),
+            DType::Extension(ext) => {
+                write!(
+                    f,
+                    "ext(\"{}\", {}, ",
+                    ext.id().python_repr(),
+                    ext.storage_dtype().python_repr()
+                )?;
                 match ext.metadata() {
                     None => write!(f, "None")?,
                     Some(metadata) => write!(f, "{}", metadata.python_repr())?,
                 };
-                write!(f, ", {})", n.python_repr())
+                write!(f, ")")
             }
         }
     }
@@ -62,7 +67,7 @@ struct NullabilityPythonRepr<'a>(&'a Nullability);
 
 impl PythonRepr for Nullability {
     fn python_repr(&self) -> impl Display {
-        return NullabilityPythonRepr(self);
+        NullabilityPythonRepr(self)
     }
 }
 
@@ -80,7 +85,7 @@ struct ExtMetadataPythonRepr<'a>(&'a ExtMetadata);
 
 impl PythonRepr for ExtMetadata {
     fn python_repr(&self) -> impl Display {
-        return ExtMetadataPythonRepr(self);
+        ExtMetadataPythonRepr(self)
     }
 }
 

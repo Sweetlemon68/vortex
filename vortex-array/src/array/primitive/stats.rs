@@ -1,5 +1,4 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::mem::size_of;
 
 use arrow_buffer::buffer::BooleanBuffer;
@@ -9,9 +8,11 @@ use vortex_dtype::{match_each_native_ptype, DType, NativePType, Nullability};
 use vortex_error::VortexResult;
 use vortex_scalar::Scalar;
 
+use crate::aliases::hash_map::HashMap;
 use crate::array::primitive::PrimitiveArray;
 use crate::stats::{ArrayStatisticsCompute, Stat, StatsSet};
 use crate::validity::{ArrayValidity, LogicalValidity};
+use crate::variants::PrimitiveArrayTrait;
 use crate::{ArrayDType, IntoArrayVariant};
 
 trait PStatsType: NativePType + Into<Scalar> + BitWidth {}
@@ -47,7 +48,7 @@ impl<T: PStatsType> ArrayStatisticsCompute for &[T] {
 
 struct NullableValues<'a, T: PStatsType>(&'a [T], &'a BooleanBuffer);
 
-impl<'a, T: PStatsType> ArrayStatisticsCompute for NullableValues<'a, T> {
+impl<T: PStatsType> ArrayStatisticsCompute for NullableValues<'_, T> {
     fn compute_statistics(&self, _stat: Stat) -> VortexResult<StatsSet> {
         let values = self.0;
         if values.is_empty() {

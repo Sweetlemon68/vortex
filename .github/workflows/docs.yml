@@ -1,0 +1,47 @@
+name: Python & Rust docs
+
+on:
+  push:
+    branches: [ develop ]
+
+permissions:
+  actions: read
+  contents: write
+  deployments: write
+
+jobs:
+  deploy-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/cleanup
+      - uses: ./.github/actions/setup-rust
+      - uses: spiraldb/actions/.github/actions/setup-uv@0.2.0
+
+      - name: build Python and Rust docs
+        run: |
+          uv run make -C docs python-and-rust-html
+      - name: commit python docs to gh-pages-bench
+        run: |
+          set -ex
+
+          built_sha=$(git rev-parse HEAD)
+
+          rm -rf docs/_build/html/rust/CACHETAG.DIR docs/_build/html/rust/debug
+          mv docs/_build/html /tmp/html
+
+          git fetch origin
+          git checkout origin/gh-pages-bench
+          rm -rf docs
+          mv /tmp/html docs
+          git add docs
+          git config --global user.email "nobody@example.com"
+          git config --global user.name "github-action-deploy-python-docs"
+
+          # Only try to commit if there exist changes
+          git diff --quiet HEAD || {
+              git commit -m 'Python docs for '$built_sha
+              git push origin HEAD:gh-pages-bench
+          }
+
+          git checkout $built_sha

@@ -1,3 +1,5 @@
+mod tokio_runtime;
+
 use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
@@ -21,12 +23,15 @@ use parquet::file::properties::WriterProperties;
 use regex::Regex;
 use tokio::runtime::Runtime;
 use vortex::array::{ChunkedArray, StructArray};
+use vortex::buffer::Buffer;
+use vortex::dtype::field::Field;
+use vortex::error::VortexResult;
+use vortex::sampling_compressor::compressors::fsst::FSSTCompressor;
+use vortex::sampling_compressor::{SamplingCompressor, ALL_ENCODINGS_CONTEXT};
+use vortex::serde::file::{LayoutContext, LayoutDeserializer, VortexFileWriter, VortexReadBuilder};
 use vortex::{Array, ArrayDType, IntoArray, IntoCanonical};
-use vortex_dtype::field::Field;
-use vortex_error::VortexResult;
-use vortex_sampling_compressor::compressors::fsst::FSSTCompressor;
-use vortex_sampling_compressor::{SamplingCompressor, ALL_COMPRESSORS_CONTEXT};
-use vortex_serde::layouts::{LayoutContext, LayoutDeserializer, LayoutReaderBuilder, LayoutWriter};
+
+use crate::tokio_runtime::TOKIO_RUNTIME;
 
 #[derive(serde::Serialize)]
 struct GenericBenchmarkResults<'a> {
@@ -102,7 +107,7 @@ fn vortex_compress_write(
     buf: &mut Vec<u8>,
 ) -> VortexResult<u64> {
     async fn async_write(array: &Array, cursor: &mut Cursor<&mut Vec<u8>>) -> VortexResult<()> {
-        let mut writer = LayoutWriter::new(cursor);
+        let mut writer = VortexFileWriter::new(cursor);
 
         writer = writer.write_array_columns(array.clone()).await?;
         writer.finalize().await?;
@@ -117,18 +122,18 @@ fn vortex_compress_write(
     Ok(cursor.position())
 }
 
-fn vortex_decompress_read(runtime: &Runtime, buf: Arc<Vec<u8>>) -> VortexResult<ArrayRef> {
-    async fn async_read(buf: Arc<Vec<u8>>) -> VortexResult<Array> {
-        let builder: LayoutReaderBuilder<_> = LayoutReaderBuilder::new(
+fn vortex_decompress_read(runtime: &Runtime, buf: Buffer) -> VortexResult<ArrayRef> {
+    async fn async_read(buf: Buffer) -> VortexResult<Array> {
+        let builder: VortexReadBuilder<_> = VortexReadBuilder::new(
             buf,
             LayoutDeserializer::new(
-                ALL_COMPRESSORS_CONTEXT.clone(),
+                ALL_ENCODINGS_CONTEXT.clone(),
                 LayoutContext::default().into(),
             ),
         );
 
         let stream = builder.build().await?;
-        let dtype = stream.schema().clone().into();
+        let dtype = stream.dtype().clone();
         let vecs: Vec<Array> = stream.try_collect().await?;
 
         ChunkedArray::try_new(vecs, dtype).map(|e| e.into())
@@ -160,10 +165,7 @@ fn benchmark_compress<F, U>(
     U: AsRef<Array>,
 {
     ensure_dir_exists("benchmarked-files").unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+    let runtime = &TOKIO_RUNTIME;
     let uncompressed = make_uncompressed();
     let uncompressed_size = uncompressed.as_ref().nbytes();
     let mut compressed_size = 0;
@@ -176,7 +178,7 @@ fn benchmark_compress<F, U>(
         group.bench_function(bench_name, |b| {
             b.iter_with_large_drop(|| {
                 compressed_size = black_box(
-                    vortex_compressed_written_size(&runtime, compressor, uncompressed.as_ref())
+                    vortex_compressed_written_size(runtime, compressor, uncompressed.as_ref())
                         .unwrap(),
                 );
             });
@@ -212,10 +214,10 @@ fn benchmark_compress<F, U>(
         measurement_time.map(|t| group.measurement_time(t));
         group.bench_function(bench_name, |b| {
             let mut buf = Vec::new();
-            vortex_compress_write(&runtime, compressor, uncompressed.as_ref(), &mut buf).unwrap();
-            let arc = Arc::new(buf);
+            vortex_compress_write(runtime, compressor, uncompressed.as_ref(), &mut buf).unwrap();
+            let bytes = Buffer::from(buf);
             b.iter_with_large_drop(|| {
-                black_box(vortex_decompress_read(&runtime, arc.clone()).unwrap());
+                black_box(vortex_decompress_read(runtime, bytes.clone()).unwrap());
             });
         });
         group.finish();
@@ -250,7 +252,7 @@ fn benchmark_compress<F, U>(
         .unwrap_or(false)
     {
         let vortex_nbytes =
-            vortex_compressed_written_size(&runtime, compressor, uncompressed.as_ref()).unwrap();
+            vortex_compressed_written_size(runtime, compressor, uncompressed.as_ref()).unwrap();
 
         let parquet_zstd_nbytes = parquet_compressed_written_size(
             uncompressed.as_ref(),
@@ -334,10 +336,7 @@ fn public_bi_benchmark(c: &mut Criterion) {
 
 fn tpc_h_l_comment(c: &mut Criterion) {
     let data_dir = DBGen::new(DBGenOptions::default()).generate().unwrap();
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+    let rt = &TOKIO_RUNTIME;
     let lineitem_vortex = rt.block_on(tpch::load_table(
         data_dir,
         "lineitem",

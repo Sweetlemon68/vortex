@@ -1,10 +1,9 @@
-use std::collections::HashSet;
-
-use vortex::array::{Constant, ConstantArray, ConstantEncoding};
-use vortex::compute::unary::scalar_at;
-use vortex::encoding::EncodingRef;
-use vortex::stats::ArrayStatistics;
-use vortex::{Array, ArrayDef, IntoArray};
+use vortex_array::aliases::hash_set::HashSet;
+use vortex_array::array::{Constant, ConstantArray, ConstantEncoding};
+use vortex_array::compute::unary::scalar_at;
+use vortex_array::encoding::EncodingRef;
+use vortex_array::stats::ArrayStatistics;
+use vortex_array::{Array, ArrayDef, IntoArray};
 use vortex_error::VortexResult;
 
 use crate::compressors::{CompressedArray, CompressionTree, EncodingCompressor};
@@ -33,9 +32,10 @@ impl EncodingCompressor for ConstantCompressor {
         _like: Option<CompressionTree<'a>>,
         _ctx: SamplingCompressor<'a>,
     ) -> VortexResult<CompressedArray<'a>> {
-        Ok(CompressedArray::new(
+        Ok(CompressedArray::compressed(
             ConstantArray::new(scalar_at(array, 0)?, array.len()).into_array(),
             Some(CompressionTree::flat(self)),
+            Some(array.statistics()),
         ))
     }
 

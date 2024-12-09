@@ -1,9 +1,9 @@
-use std::collections::HashSet;
-
-use vortex::array::PrimitiveArray;
-use vortex::encoding::EncodingRef;
-use vortex::stats::{ArrayStatistics, Stat};
-use vortex::{Array, ArrayDef, IntoArray};
+use vortex_array::aliases::hash_set::HashSet;
+use vortex_array::array::PrimitiveArray;
+use vortex_array::encoding::EncodingRef;
+use vortex_array::stats::{ArrayStatistics, Stat};
+use vortex_array::variants::PrimitiveArrayTrait;
+use vortex_array::{Array, ArrayDef, IntoArray};
 use vortex_error::VortexResult;
 use vortex_zigzag::{zigzag_encode, ZigZag, ZigZagArray, ZigZagEncoding};
 
@@ -49,9 +49,10 @@ impl EncodingCompressor for ZigZagCompressor {
         let encoded = zigzag_encode(PrimitiveArray::try_from(array)?)?;
         let compressed =
             ctx.compress(&encoded.encoded(), like.as_ref().and_then(|l| l.child(0)))?;
-        Ok(CompressedArray::new(
+        Ok(CompressedArray::compressed(
             ZigZagArray::try_new(compressed.array)?.into_array(),
             Some(CompressionTree::new(self, vec![compressed.path])),
+            Some(array.statistics()),
         ))
     }
 

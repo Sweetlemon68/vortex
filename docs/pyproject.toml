@@ -4,15 +4,16 @@ version = "0.1.0"
 description = "Vortex documentation."
 authors = []
 dependencies = [
-    "pydata-sphinx-theme>=0.15.4",
+    "pydata-sphinx-theme>=0.16.0",
     "sphinx>=8.0.2",
-    "pyvortex"
+    "vortex-array",
+    "sphinx-design>=0.6.1",
 ]
-requires-python = ">= 3.11"
+requires-python = ">= 3.10"
 
-[tool.rye]
+[tool.uv]
 managed = true
-virtual = true
+package = false
 
-[tool.rye.scripts]
-build-docs = "sphinx-build -M html . _build --fail-on-warning --keep-going"
+[tool.uv.sources]
+vortex-array = { workspace = true }
