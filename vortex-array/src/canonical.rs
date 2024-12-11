@@ -167,7 +167,7 @@ fn bool_to_arrow(bool_array: BoolArray) -> VortexResult<ArrayRef> {
     )))
 }
 
-fn primitive_to_arrow(primitive_array: PrimitiveArray) -> VortexResult<ArrayRef> {
+pub fn primitive_to_arrow(primitive_array: PrimitiveArray) -> VortexResult<ArrayRef> {
     fn as_arrow_array_primitive<T: ArrowPrimitiveType>(
         array: &PrimitiveArray,
     ) -> VortexResult<Arc<ArrowPrimitiveArray<T>>> {
