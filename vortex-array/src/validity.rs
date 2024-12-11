@@ -297,7 +297,8 @@ impl Validity {
     pub fn patch(self, len: usize, indices: &ArrayData, patches: Validity) -> VortexResult<Self> {
         match (&self, &patches) {
             (Validity::NonNullable, Validity::NonNullable) => return Ok(Validity::NonNullable),
-            (Validity::NonNullable, _) => {
+            (Validity::NonNullable, Validity::AllInvalid)
+            | (Validity::NonNullable, Validity::Array(_)) => {
                 vortex_bail!("Can't patch a non-nullable validity with nullable validity")
             }
             (_, Validity::NonNullable) => {
