@@ -1,21 +1,22 @@
 use vortex_error::VortexResult;
 
 use crate::array::sparse::SparseArray;
+use crate::array::SparseEncoding;
 use crate::compute::{slice, SliceFn};
-use crate::{Array, IntoArray};
+use crate::{ArrayData, IntoArrayData};
 
-impl SliceFn for SparseArray {
-    fn slice(&self, start: usize, stop: usize) -> VortexResult<Array> {
+impl SliceFn<SparseArray> for SparseEncoding {
+    fn slice(&self, array: &SparseArray, start: usize, stop: usize) -> VortexResult<ArrayData> {
         // Find the index of the first patch index that is greater than or equal to the offset of this array
-        let index_start_index = self.search_index(start)?.to_index();
-        let index_end_index = self.search_index(stop)?.to_index();
+        let index_start_index = array.search_index(start)?.to_index();
+        let index_end_index = array.search_index(stop)?.to_index();
 
-        Ok(Self::try_new_with_offset(
-            slice(self.indices(), index_start_index, index_end_index)?,
-            slice(self.values(), index_start_index, index_end_index)?,
+        Ok(SparseArray::try_new_with_offset(
+            slice(array.indices(), index_start_index, index_end_index)?,
+            slice(array.values(), index_start_index, index_end_index)?,
             stop - start,
-            self.indices_offset() + start,
-            self.fill_value().clone(),
+            array.indices_offset() + start,
+            array.fill_scalar(),
         )?
         .into_array())
     }
@@ -31,7 +32,7 @@ mod tests {
         let values = vec![15_u32, 135, 13531, 42].into_array();
         let indices = vec![10_u64, 11, 50, 100].into_array();
 
-        let sparse = SparseArray::try_new(indices.clone(), values, 101, 0_u32.into())
+        let sparse = SparseArray::try_new(indices, values, 101, 0_u32.into())
             .unwrap()
             .into_array();
 
@@ -51,7 +52,7 @@ mod tests {
         let values = vec![15_u32, 135, 13531, 42].into_array();
         let indices = vec![10_u64, 11, 50, 100].into_array();
 
-        let sparse = SparseArray::try_new(indices.clone(), values, 101, 0_u32.into())
+        let sparse = SparseArray::try_new(indices, values, 101, 0_u32.into())
             .unwrap()
             .into_array();
 
@@ -73,5 +74,23 @@ mod tests {
             .unwrap();
 
         assert_eq!(primitive_doubly_sliced.maybe_null_slice::<u32>(), &[13531]);
+    }
+
+    #[test]
+    fn slice_partially_invalid() {
+        let values = vec![0u64].into_array();
+        let indices = vec![0u8].into_array();
+
+        let sparse = SparseArray::try_new(indices, values, 1000, 999u64.into()).unwrap();
+        let sliced = slice(&sparse, 0, 1000).unwrap();
+        let mut expected = vec![999u64; 1000];
+        expected[0] = 0;
+
+        let actual = sliced
+            .into_primitive()
+            .unwrap()
+            .maybe_null_slice::<u64>()
+            .to_vec();
+        assert_eq!(expected, actual);
     }
 }

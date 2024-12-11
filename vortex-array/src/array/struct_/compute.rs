@@ -3,106 +3,102 @@ use vortex_error::VortexResult;
 use vortex_scalar::Scalar;
 
 use crate::array::struct_::StructArray;
-use crate::compute::unary::{scalar_at, scalar_at_unchecked, ScalarAtFn};
-use crate::compute::{filter, slice, take, ArrayCompute, FilterFn, SliceFn, TakeFn};
-use crate::stats::ArrayStatistics;
+use crate::array::StructEncoding;
+use crate::compute::{
+    filter, scalar_at, slice, take, ComputeVTable, FilterFn, FilterMask, ScalarAtFn, SliceFn,
+    TakeFn, TakeOptions,
+};
 use crate::variants::StructArrayTrait;
-use crate::{Array, ArrayDType, IntoArray};
+use crate::{ArrayDType, ArrayData, IntoArrayData};
 
-impl ArrayCompute for StructArray {
-    fn filter(&self) -> Option<&dyn FilterFn> {
+impl ComputeVTable for StructEncoding {
+    fn filter_fn(&self) -> Option<&dyn FilterFn<ArrayData>> {
         Some(self)
     }
 
-    fn scalar_at(&self) -> Option<&dyn ScalarAtFn> {
+    fn scalar_at_fn(&self) -> Option<&dyn ScalarAtFn<ArrayData>> {
         Some(self)
     }
 
-    fn slice(&self) -> Option<&dyn SliceFn> {
+    fn slice_fn(&self) -> Option<&dyn SliceFn<ArrayData>> {
         Some(self)
     }
 
-    fn take(&self) -> Option<&dyn TakeFn> {
+    fn take_fn(&self) -> Option<&dyn TakeFn<ArrayData>> {
         Some(self)
     }
 }
 
-impl ScalarAtFn for StructArray {
-    fn scalar_at(&self, index: usize) -> VortexResult<Scalar> {
-        Ok(Scalar::r#struct(
-            self.dtype().clone(),
-            self.children()
-                .map(|field| scalar_at(&field, index).map(|s| s.into_value()))
+impl ScalarAtFn<StructArray> for StructEncoding {
+    fn scalar_at(&self, array: &StructArray, index: usize) -> VortexResult<Scalar> {
+        Ok(Scalar::struct_(
+            array.dtype().clone(),
+            array
+                .children()
+                .map(|field| scalar_at(&field, index))
                 .try_collect()?,
         ))
     }
-
-    fn scalar_at_unchecked(&self, index: usize) -> Scalar {
-        Scalar::r#struct(
-            self.dtype().clone(),
-            self.children()
-                .map(|field| scalar_at_unchecked(&field, index).into_value())
-                .collect(),
-        )
-    }
 }
 
-impl TakeFn for StructArray {
-    fn take(&self, indices: &Array) -> VortexResult<Array> {
-        Self::try_new(
-            self.names().clone(),
-            self.children()
-                .map(|field| take(&field, indices))
+impl TakeFn<StructArray> for StructEncoding {
+    fn take(
+        &self,
+        array: &StructArray,
+        indices: &ArrayData,
+        options: TakeOptions,
+    ) -> VortexResult<ArrayData> {
+        StructArray::try_new(
+            array.names().clone(),
+            array
+                .children()
+                .map(|field| take(&field, indices, options))
                 .try_collect()?,
             indices.len(),
-            self.validity().take(indices)?,
+            array.validity().take(indices, options)?,
         )
         .map(|a| a.into_array())
     }
 }
 
-impl SliceFn for StructArray {
-    fn slice(&self, start: usize, stop: usize) -> VortexResult<Array> {
-        let fields = self
+impl SliceFn<StructArray> for StructEncoding {
+    fn slice(&self, array: &StructArray, start: usize, stop: usize) -> VortexResult<ArrayData> {
+        let fields = array
             .children()
             .map(|field| slice(&field, start, stop))
             .try_collect()?;
-        Self::try_new(
-            self.names().clone(),
+        StructArray::try_new(
+            array.names().clone(),
             fields,
             stop - start,
-            self.validity().slice(start, stop)?,
+            array.validity().slice(start, stop)?,
         )
         .map(|a| a.into_array())
     }
 }
 
-impl FilterFn for StructArray {
-    fn filter(&self, predicate: &Array) -> VortexResult<Array> {
-        let fields: Vec<Array> = self
+impl FilterFn<StructArray> for StructEncoding {
+    fn filter(&self, array: &StructArray, mask: FilterMask) -> VortexResult<ArrayData> {
+        let validity = array.validity().filter(&mask)?;
+
+        let fields: Vec<ArrayData> = array
             .children()
-            .map(|field| filter(&field, predicate))
+            .map(|field| filter(&field, mask.clone()))
             .try_collect()?;
         let length = fields
             .first()
             .map(|a| a.len())
-            .or_else(|| predicate.statistics().compute_true_count())
-            .unwrap_or_default();
+            .unwrap_or_else(|| mask.true_count());
 
-        Self::try_new(
-            self.names().clone(),
-            fields,
-            length,
-            self.validity().filter(predicate)?,
-        )
-        .map(|a| a.into_array())
+        StructArray::try_new(array.names().clone(), fields, length, validity)
+            .map(|a| a.into_array())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::array::{BoolArray, StructArray};
-    use crate::compute::filter;
+    use crate::array::StructArray;
+    use crate::compute::{filter, FilterMask};
     use crate::validity::Validity;
 
     #[test]
@@ -112,7 +108,7 @@ mod tests {
         let mask = vec![
             false, true, false, true, false, true, false, true, false, true,
         ];
-        let filtered = filter(struct_arr.as_ref(), BoolArray::from(mask)).unwrap();
+        let filtered = filter(struct_arr.as_ref(), FilterMask::from_iter(mask)).unwrap();
         assert_eq!(filtered.len(), 5);
     }
 
@@ -120,7 +116,7 @@ mod tests {
     fn filter_empty_struct_with_empty_filter() {
         let struct_arr =
             StructArray::try_new(vec![].into(), vec![], 0, Validity::NonNullable).unwrap();
-        let filtered = filter(struct_arr.as_ref(), BoolArray::from(vec![])).unwrap();
+        let filtered = filter(struct_arr.as_ref(), FilterMask::from_iter::<[bool; 0]>([])).unwrap();
         assert_eq!(filtered.len(), 0);
     }
 }

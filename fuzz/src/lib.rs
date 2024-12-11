@@ -11,10 +11,9 @@ use std::ops::Range;
 use libfuzzer_sys::arbitrary::Error::EmptyChoose;
 use libfuzzer_sys::arbitrary::{Arbitrary, Result, Unstructured};
 pub use sort::sort_canonical_array;
-use vortex_array::array::{BoolArray, PrimitiveArray};
-use vortex_array::compute::unary::scalar_at;
-use vortex_array::compute::{SearchResult, SearchSortedSide};
-use vortex_array::{Array, ArrayDType, IntoArray};
+use vortex_array::array::PrimitiveArray;
+use vortex_array::compute::{scalar_at, FilterMask, SearchResult, SearchSortedSide};
+use vortex_array::{ArrayDType, ArrayData, IntoArrayData};
 use vortex_sampling_compressor::SamplingCompressor;
 use vortex_scalar::arbitrary::random_scalar;
 use vortex_scalar::Scalar;
@@ -26,12 +25,12 @@ use crate::take::take_canonical_array;
 
 #[derive(Debug)]
 pub enum ExpectedValue {
-    Array(Array),
+    Array(ArrayData),
     Search(SearchResult),
 }
 
 impl ExpectedValue {
-    pub fn array(self) -> Array {
+    pub fn array(self) -> ArrayData {
         match self {
             ExpectedValue::Array(array) => array,
             _ => panic!("expected array"),
@@ -48,7 +47,7 @@ impl ExpectedValue {
 
 #[derive(Debug)]
 pub struct FuzzArrayAction {
-    pub array: Array,
+    pub array: ArrayData,
     pub actions: Vec<(Action, ExpectedValue)>,
 }
 
@@ -56,14 +55,14 @@ pub struct FuzzArrayAction {
 pub enum Action {
     Compress(SamplingCompressor<'static>),
     Slice(Range<usize>),
-    Take(Array),
+    Take(ArrayData),
     SearchSorted(Scalar, SearchSortedSide),
-    Filter(Array),
+    Filter(FilterMask),
 }
 
 impl<'a> Arbitrary<'a> for FuzzArrayAction {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
-        let array = Array::arbitrary(u)?;
+        let array = ArrayData::arbitrary(u)?;
         let mut current_array = array.clone();
         let mut actions = Vec::new();
         let action_count = u.int_in_range(1..=4)?;
@@ -101,7 +100,7 @@ impl<'a> Arbitrary<'a> for FuzzArrayAction {
                     current_array = take_canonical_array(&current_array, &indices);
                     let indices_array =
                         PrimitiveArray::from(indices.iter().map(|i| *i as u64).collect::<Vec<_>>())
-                            .into();
+                            .into_array();
                     let compressed = SamplingCompressor::default()
                         .compress(&indices_array, None)
                         .unwrap();
@@ -141,7 +140,7 @@ impl<'a> Arbitrary<'a> for FuzzArrayAction {
                         .collect::<Result<Vec<_>>>()?;
                     current_array = filter_canonical_array(&current_array, &mask);
                     (
-                        Action::Filter(BoolArray::from(mask).into_array()),
+                        Action::Filter(FilterMask::from_iter(mask)),
                         ExpectedValue::Array(current_array.clone()),
                     )
                 }

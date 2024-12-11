@@ -1,4 +1,3 @@
-use std::fmt::{Display, Formatter};
 use std::fs;
 use std::fs::create_dir_all;
 use std::path::Path;
@@ -7,23 +6,25 @@ use std::sync::Arc;
 use arrow_array::StructArray as ArrowStructArray;
 use arrow_schema::Schema;
 use datafusion::dataframe::DataFrameWriteOptions;
+use datafusion::datasource::listing::{
+    ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+};
 use datafusion::datasource::MemTable;
-use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::prelude::{CsvReadOptions, ParquetReadOptions, SessionContext};
 use tokio::fs::OpenOptions;
 use vortex::aliases::hash_map::HashMap;
 use vortex::array::{ChunkedArray, StructArray};
 use vortex::arrow::FromArrowArray;
 use vortex::dtype::DType;
+use vortex::file::{VortexFileWriter, VORTEX_FILE_EXTENSION};
 use vortex::sampling_compressor::SamplingCompressor;
-use vortex::serde::file::{VortexFileWriter, VORTEX_FILE_EXTENSION};
 use vortex::variants::StructArrayTrait;
-use vortex::{Array, ArrayDType, IntoArray, IntoArrayVariant};
+use vortex::{ArrayDType, ArrayData, IntoArrayData, IntoArrayVariant};
 use vortex_datafusion::memory::VortexMemTableOptions;
-use vortex_datafusion::persistent::config::{VortexFile, VortexTableOptions};
+use vortex_datafusion::persistent::format::VortexFormat;
 use vortex_datafusion::SessionContextExt;
 
-use crate::{idempotent_async, CTX};
+use crate::{idempotent_async, Format, CTX, TARGET_BLOCK_BYTESIZE, TARGET_BLOCK_SIZE};
 
 pub mod dbgen;
 mod execute;
@@ -34,35 +35,6 @@ pub use execute::*;
 pub const EXPECTED_ROW_COUNTS: [usize; 23] = [
     0, 4, 460, 11620, 5, 5, 1, 4, 2, 175, 37967, 1048, 2, 42, 1, 1, 18314, 1, 57, 1, 186, 411, 7,
 ];
-
-// Sizes match default compressor configuration
-const TARGET_BLOCK_BYTESIZE: usize = 16 * (1 << 20);
-const TARGET_BLOCK_SIZE: usize = 64 * (1 << 10);
-
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub enum Format {
-    Csv,
-    Arrow,
-    Parquet,
-    InMemoryVortex { enable_pushdown: bool },
-    OnDiskVortex { enable_compression: bool },
-}
-
-impl Display for Format {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Format::Csv => write!(f, "csv"),
-            Format::Arrow => write!(f, "arrow"),
-            Format::Parquet => write!(f, "parquet"),
-            Format::InMemoryVortex { enable_pushdown } => {
-                write!(f, "in_memory_vortex(pushdown={enable_pushdown})")
-            }
-            Format::OnDiskVortex { enable_compression } => {
-                write!(f, "on_disk_vortex(compressed={enable_compression})")
-            }
-        }
-    }
-}
 
 // Generate table dataset.
 pub async fn load_datasets<P: AsRef<Path>>(
@@ -218,7 +190,7 @@ async fn register_parquet(
 
 async fn register_vortex_file(
     session: &SessionContext,
-    name: &str,
+    table_name: &str,
     file: &Path,
     schema: &Schema,
     enable_compression: bool,
@@ -249,11 +221,11 @@ async fn register_vortex_file(
         // Create a ChunkedArray from the set of chunks.
         let sts = record_batches
             .into_iter()
-            .map(Array::try_from)
+            .map(ArrayData::try_from)
             .map(|a| a.unwrap().into_struct().unwrap())
             .collect::<Vec<_>>();
 
-        let mut arrays_map: HashMap<Arc<str>, Vec<Array>> = HashMap::default();
+        let mut arrays_map: HashMap<Arc<str>, Vec<ArrayData>> = HashMap::default();
         let mut types_map: HashMap<Arc<str>, DType> = HashMap::default();
 
         for st in sts.into_iter() {
@@ -311,27 +283,16 @@ async fn register_vortex_file(
     })
     .await?;
 
-    let f = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&vtx_file)
+    let format = Arc::new(VortexFormat::new(&CTX));
+    let table_url = ListingTableUrl::parse(vtx_file.to_str().unwrap())?;
+    let config = ListingTableConfig::new(table_url)
+        .with_listing_options(ListingOptions::new(format as _))
+        .infer_schema(&session.state())
         .await?;
-    let file_size = f.metadata().await?.len();
 
-    let schema_ref = Arc::new(schema.clone());
+    let listing_table = Arc::new(ListingTable::try_new(config)?);
 
-    session.register_disk_vortex_opts(
-        name,
-        ObjectStoreUrl::local_filesystem(),
-        VortexTableOptions::new(
-            schema_ref,
-            vec![VortexFile::new(
-                vtx_file.to_str().unwrap().to_string(),
-                file_size,
-            )],
-            CTX.clone(),
-        ),
-    )?;
+    session.register_table(table_name, listing_table as _)?;
 
     Ok(())
 }
@@ -357,10 +318,10 @@ async fn register_vortex(
         .await?;
 
     // Create a ChunkedArray from the set of chunks.
-    let chunks: Vec<Array> = record_batches
+    let chunks: Vec<ArrayData> = record_batches
         .into_iter()
         .map(ArrowStructArray::from)
-        .map(|struct_array| Array::from_arrow(&struct_array, false))
+        .map(|struct_array| ArrayData::from_arrow(&struct_array, false))
         .collect();
 
     let dtype = chunks[0].dtype().clone();
@@ -376,7 +337,7 @@ async fn register_vortex(
 }
 
 /// Load a table as an uncompressed Vortex array.
-pub async fn load_table(data_dir: impl AsRef<Path>, name: &str, schema: &Schema) -> Array {
+pub async fn load_table(data_dir: impl AsRef<Path>, name: &str, schema: &Schema) -> ArrayData {
     // Create a local session to load the CSV file from the path.
     let path = data_dir
         .as_ref()
@@ -400,10 +361,10 @@ pub async fn load_table(data_dir: impl AsRef<Path>, name: &str, schema: &Schema)
         .await
         .unwrap();
 
-    let chunks: Vec<Array> = record_batches
+    let chunks: Vec<ArrayData> = record_batches
         .into_iter()
         .map(ArrowStructArray::from)
-        .map(|struct_array| Array::from_arrow(&struct_array, false))
+        .map(|struct_array| ArrayData::from_arrow(&struct_array, false))
         .collect();
 
     let dtype = chunks[0].dtype().clone();

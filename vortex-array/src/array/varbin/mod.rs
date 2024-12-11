@@ -2,7 +2,7 @@ use std::fmt::{Debug, Display};
 
 use num_traits::AsPrimitive;
 use serde::{Deserialize, Serialize};
-pub use stats::compute_stats;
+pub use stats::compute_varbin_statistics;
 use vortex_buffer::Buffer;
 use vortex_dtype::{match_each_native_ptype, DType, NativePType, Nullability, PType};
 use vortex_error::{
@@ -13,13 +13,12 @@ use vortex_scalar::Scalar;
 
 use crate::array::primitive::PrimitiveArray;
 use crate::array::varbin::builder::VarBinBuilder;
-use crate::compute::slice;
-use crate::compute::unary::scalar_at;
+use crate::compute::{scalar_at, slice};
 use crate::encoding::ids;
 use crate::stats::StatsSet;
 use crate::validity::{Validity, ValidityMetadata};
 use crate::variants::PrimitiveArrayTrait;
-use crate::{impl_encoding, Array, ArrayDType, ArrayTrait, IntoArrayVariant};
+use crate::{impl_encoding, ArrayDType, ArrayData, ArrayLen, ArrayTrait, IntoArrayVariant};
 
 mod accessor;
 mod array;
@@ -47,8 +46,8 @@ impl Display for VarBinMetadata {
 
 impl VarBinArray {
     pub fn try_new(
-        offsets: Array,
-        bytes: Array,
+        offsets: ArrayData,
+        bytes: ArrayData,
         dtype: DType,
         validity: Validity,
     ) -> VortexResult<Self> {
@@ -81,11 +80,17 @@ impl VarBinArray {
             children.push(a)
         }
 
-        Self::try_from_parts(dtype, length, metadata, children.into(), StatsSet::new())
+        Self::try_from_parts(
+            dtype,
+            length,
+            metadata,
+            children.into(),
+            StatsSet::default(),
+        )
     }
 
     #[inline]
-    pub fn offsets(&self) -> Array {
+    pub fn offsets(&self) -> ArrayData {
         self.as_ref()
             .child(
                 0,
@@ -112,7 +117,7 @@ impl VarBinArray {
     /// that are not logically present in the array. Users should prefer [sliced_bytes][Self::sliced_bytes]
     /// unless they're resolving values via offset child array.
     #[inline]
-    pub fn bytes(&self) -> Array {
+    pub fn bytes(&self) -> ArrayData {
         self.as_ref()
             .child(1, &DType::BYTES, self.metadata().bytes_len)
             .vortex_expect("Missing bytes in VarBinArray")
@@ -128,7 +133,7 @@ impl VarBinArray {
 
     /// Access value bytes child array limited to values that are logically present in
     /// the array unlike [bytes][Self::bytes].
-    pub fn sliced_bytes(&self) -> VortexResult<Array> {
+    pub fn sliced_bytes(&self) -> VortexResult<ArrayData> {
         let first_offset: usize = scalar_at(self.offsets(), 0)?.as_ref().try_into()?;
         let last_offset: usize = scalar_at(self.offsets(), self.offsets().len() - 1)?
             .as_ref()
@@ -210,7 +215,7 @@ impl VarBinArray {
 
     /// Consumes self, returning a tuple containing the `DType`, the `bytes` array,
     /// the `offsets` array, and the `validity`.
-    pub fn into_parts(self) -> (DType, Array, Array, Validity) {
+    pub fn into_parts(self) -> (DType, ArrayData, ArrayData, Validity) {
         (
             self.dtype().clone(),
             self.bytes(),
@@ -287,13 +292,12 @@ mod test {
 
     use crate::array::primitive::PrimitiveArray;
     use crate::array::varbin::VarBinArray;
-    use crate::compute::slice;
-    use crate::compute::unary::scalar_at;
+    use crate::compute::{scalar_at, slice};
     use crate::validity::Validity;
-    use crate::{Array, IntoArray};
+    use crate::{ArrayData, IntoArrayData};
 
     #[fixture]
-    fn binary_array() -> Array {
+    fn binary_array() -> ArrayData {
         let values = PrimitiveArray::from(
             "hello worldhello world this is a long string"
                 .as_bytes()
@@ -312,7 +316,7 @@ mod test {
     }
 
     #[rstest]
-    pub fn test_scalar_at(binary_array: Array) {
+    pub fn test_scalar_at(binary_array: ArrayData) {
         assert_eq!(binary_array.len(), 2);
         assert_eq!(scalar_at(&binary_array, 0).unwrap(), "hello world".into());
         assert_eq!(
@@ -322,7 +326,7 @@ mod test {
     }
 
     #[rstest]
-    pub fn slice_array(binary_array: Array) {
+    pub fn slice_array(binary_array: ArrayData) {
         let binary_arr = slice(&binary_array, 1, 2).unwrap();
         assert_eq!(
             scalar_at(&binary_arr, 0).unwrap(),

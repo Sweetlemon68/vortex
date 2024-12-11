@@ -3,11 +3,13 @@ use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use itertools::{EitherOrBoth, Itertools};
 use vortex_array::aliases::hash_set::HashSet;
 use vortex_array::encoding::EncodingRef;
-use vortex_array::stats::{ArrayStatistics, Statistics};
-use vortex_array::Array;
-use vortex_error::VortexResult;
+use vortex_array::stats::ArrayStatistics;
+use vortex_array::tree::TreeFormatter;
+use vortex_array::{ArrayDType, ArrayData};
+use vortex_error::{vortex_panic, VortexExpect, VortexResult};
 
 use crate::SamplingCompressor;
 
@@ -21,11 +23,16 @@ pub mod delta;
 pub mod dict;
 pub mod r#for;
 pub mod fsst;
+pub mod list;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod roaring_bool;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod roaring_int;
 pub mod runend;
+pub mod runend_bool;
 pub mod sparse;
 pub mod struct_;
+pub mod varbin;
 pub mod zigzag;
 
 pub trait EncodingCompressor: Sync + Send + Debug {
@@ -33,11 +40,11 @@ pub trait EncodingCompressor: Sync + Send + Debug {
 
     fn cost(&self) -> u8;
 
-    fn can_compress(&self, array: &Array) -> Option<&dyn EncodingCompressor>;
+    fn can_compress(&self, array: &ArrayData) -> Option<&dyn EncodingCompressor>;
 
     fn compress<'a>(
         &'a self,
-        array: &Array,
+        array: &ArrayData,
         like: Option<CompressionTree<'a>>,
         ctx: SamplingCompressor<'a>,
     ) -> VortexResult<CompressedArray<'a>>;
@@ -82,8 +89,27 @@ pub trait EncoderMetadata {
 
 impl Display for CompressionTree<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(self.compressor.id(), f)
+        let mut fmt = TreeFormatter::new(f, "".to_string());
+        visit_child("root", Some(self), &mut fmt)
     }
+}
+
+fn visit_child(
+    name: &str,
+    child: Option<&CompressionTree>,
+    fmt: &mut TreeFormatter,
+) -> std::fmt::Result {
+    fmt.indent(|f| {
+        if let Some(child) = child {
+            writeln!(f, "{name}: {}", child.compressor.id())?;
+            for (i, c) in child.children.iter().enumerate() {
+                visit_child(&format!("{name}.{}", i), c.as_ref(), f)?;
+            }
+        } else {
+            writeln!(f, "{name}: uncompressed")?;
+        }
+        Ok(())
+    })
 }
 
 impl<'a> CompressionTree<'a> {
@@ -125,7 +151,7 @@ impl<'a> CompressionTree<'a> {
     /// Compresses array with our compressor without verifying that the compressor can compress this array
     pub fn compress_unchecked(
         &self,
-        array: &Array,
+        array: &ArrayData,
         ctx: &SamplingCompressor<'a>,
     ) -> VortexResult<CompressedArray<'a>> {
         self.compressor.compress(
@@ -137,7 +163,7 @@ impl<'a> CompressionTree<'a> {
 
     pub fn compress(
         &self,
-        array: &Array,
+        array: &ArrayData,
         ctx: &SamplingCompressor<'a>,
     ) -> Option<VortexResult<CompressedArray<'a>>> {
         self.compressor
@@ -159,13 +185,6 @@ impl<'a> CompressionTree<'a> {
         std::mem::take(&mut self.metadata)
     }
 
-    pub fn num_descendants(&self) -> usize {
-        self.children
-            .iter()
-            .filter_map(|child| child.as_ref().map(|c| c.num_descendants() + 1))
-            .sum::<usize>()
-    }
-
     #[allow(clippy::type_complexity)]
     pub fn into_parts(
         self,
@@ -180,35 +199,85 @@ impl<'a> CompressionTree<'a> {
 
 #[derive(Debug, Clone)]
 pub struct CompressedArray<'a> {
-    array: Array,
+    array: ArrayData,
     path: Option<CompressionTree<'a>>,
 }
 
 impl<'a> CompressedArray<'a> {
-    pub fn uncompressed(array: Array) -> Self {
+    pub fn uncompressed(array: ArrayData) -> Self {
         Self { array, path: None }
     }
 
     pub fn compressed(
-        array: Array,
+        compressed: ArrayData,
         path: Option<CompressionTree<'a>>,
-        inherited_stats: Option<&dyn Statistics>,
+        uncompressed: impl AsRef<ArrayData>,
     ) -> Self {
-        if let Some(stats) = inherited_stats {
-            for (stat, value) in stats.to_set().into_iter() {
-                array.statistics().set(stat, value);
-            }
+        let uncompressed = uncompressed.as_ref();
+
+        // Sanity check the compressed array
+        assert_eq!(
+            compressed.len(),
+            uncompressed.len(),
+            "Compressed array {} has different length to uncompressed",
+            compressed.encoding().id(),
+        );
+        assert_eq!(
+            compressed.dtype(),
+            uncompressed.dtype(),
+            "Compressed array {} has different dtype to uncompressed",
+            compressed.encoding().id(),
+        );
+
+        // eagerly compute uncompressed size in bytes at compression time, since it's
+        // too expensive to compute after compression
+        let _ = uncompressed
+            .statistics()
+            .compute_uncompressed_size_in_bytes();
+        compressed.inherit_statistics(uncompressed.statistics());
+
+        let compressed = Self {
+            array: compressed,
+            path,
+        };
+        compressed.validate();
+        compressed
+    }
+
+    fn validate(&self) {
+        self.validate_children(self.path.as_ref(), &self.array)
+    }
+
+    fn validate_children(&self, path: Option<&CompressionTree>, array: &ArrayData) {
+        if let Some(path) = path.as_ref() {
+            path.children
+                .iter()
+                .zip_longest(array.children().iter())
+                .for_each(|pair| match pair {
+                    EitherOrBoth::Both(Some(child_tree), child_array) => {
+                        self.validate_children(Some(child_tree), child_array);
+                    }
+                    EitherOrBoth::Left(Some(child_tree)) => {
+                        vortex_panic!(
+                            "Child tree without child array!!\nroot tree: {}\nroot array: {}\nlocal tree: {path}\nlocal array: {}\nproblematic child_tree: {child_tree}",
+                            self.path().as_ref().vortex_expect("must be present"),
+                            self.array.tree_display(),
+                            array.tree_display()
+                        );
+                    }
+                    // if the child_tree is None, we have an uncompressed child array or both were None; fine either way
+                    _ => {},
+                });
         }
-        Self { array, path }
     }
 
     #[inline]
-    pub fn array(&self) -> &Array {
+    pub fn array(&self) -> &ArrayData {
         &self.array
     }
 
     #[inline]
-    pub fn into_array(self) -> Array {
+    pub fn into_array(self) -> ArrayData {
         self.array
     }
 
@@ -223,7 +292,7 @@ impl<'a> CompressedArray<'a> {
     }
 
     #[inline]
-    pub fn into_parts(self) -> (Array, Option<CompressionTree<'a>>) {
+    pub fn into_parts(self) -> (ArrayData, Option<CompressionTree<'a>>) {
         (self.array, self.path)
     }
 
@@ -234,8 +303,8 @@ impl<'a> CompressedArray<'a> {
     }
 }
 
-impl AsRef<Array> for CompressedArray<'_> {
-    fn as_ref(&self) -> &Array {
+impl AsRef<ArrayData> for CompressedArray<'_> {
+    fn as_ref(&self) -> &ArrayData {
         &self.array
     }
 }

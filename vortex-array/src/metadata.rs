@@ -6,12 +6,13 @@ use flexbuffers::{FlexbufferSerializer, Reader};
 use serde::{Deserialize, Serialize};
 use vortex_error::{vortex_err, VortexResult};
 
+use crate::encoding::Encoding;
+
 /// Dynamic trait used to represent opaque owned Array metadata
 ///
 /// Note that this allows us to restrict the ('static + Send + Sync) requirement to just the
 /// metadata trait, and not the entire array trait. We require 'static so that we can downcast
 /// use the Any trait.
-/// TODO(ngates): add Display
 pub trait ArrayMetadata:
     'static + Send + Sync + Debug + TrySerializeArrayMetadata + Display
 {
@@ -44,5 +45,19 @@ impl<'de, M: Deserialize<'de>> TryDeserializeArrayMetadata<'de> for M {
     fn try_deserialize_metadata(metadata: Option<&'de [u8]>) -> VortexResult<Self> {
         let bytes = metadata.ok_or_else(|| vortex_err!("Array requires metadata bytes"))?;
         Ok(M::deserialize(Reader::get_root(bytes)?)?)
+    }
+}
+
+pub trait MetadataVTable {
+    fn load_metadata(&self, metadata: Option<&[u8]>) -> VortexResult<Arc<dyn ArrayMetadata>>;
+}
+
+impl<E: Encoding> MetadataVTable for E
+where
+    E::Metadata: for<'m> TryDeserializeArrayMetadata<'m>,
+{
+    fn load_metadata(&self, metadata: Option<&[u8]>) -> VortexResult<Arc<dyn ArrayMetadata>> {
+        E::Metadata::try_deserialize_metadata(metadata)
+            .map(|m| Arc::new(m) as Arc<dyn ArrayMetadata>)
     }
 }

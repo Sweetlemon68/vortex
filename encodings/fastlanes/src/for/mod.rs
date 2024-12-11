@@ -2,12 +2,14 @@ use std::fmt::{Debug, Display};
 
 pub use compress::*;
 use serde::{Deserialize, Serialize};
-use vortex_array::array::visitor::{AcceptArrayVisitor, ArrayVisitor};
 use vortex_array::encoding::ids;
-use vortex_array::stats::{ArrayStatisticsCompute, StatsSet};
-use vortex_array::validity::{ArrayValidity, LogicalValidity};
-use vortex_array::variants::{ArrayVariants, PrimitiveArrayTrait};
-use vortex_array::{impl_encoding, Array, ArrayDType, ArrayTrait, Canonical, IntoCanonical};
+use vortex_array::stats::{StatisticsVTable, StatsSet};
+use vortex_array::validity::{ArrayValidity, LogicalValidity, ValidityVTable};
+use vortex_array::variants::{PrimitiveArrayTrait, VariantsVTable};
+use vortex_array::visitor::{ArrayVisitor, VisitorVTable};
+use vortex_array::{
+    impl_encoding, ArrayDType, ArrayData, ArrayLen, ArrayTrait, Canonical, IntoCanonical,
+};
 use vortex_dtype::DType;
 use vortex_error::{vortex_bail, VortexExpect as _, VortexResult};
 use vortex_scalar::{Scalar, ScalarValue};
@@ -30,7 +32,7 @@ impl Display for FoRMetadata {
 }
 
 impl FoRArray {
-    pub fn try_new(child: Array, reference: Scalar, shift: u8) -> VortexResult<Self> {
+    pub fn try_new(child: ArrayData, reference: Scalar, shift: u8) -> VortexResult<Self> {
         if reference.is_null() {
             vortex_bail!("Reference value cannot be null");
         }
@@ -49,12 +51,12 @@ impl FoRArray {
                 shift,
             },
             [child].into(),
-            StatsSet::new(),
+            StatsSet::default(),
         )
     }
 
     #[inline]
-    pub fn encoded(&self) -> Array {
+    pub fn encoded(&self) -> ArrayData {
         let dtype = if self.ptype().is_signed_int() {
             &DType::Primitive(self.ptype().to_unsigned(), self.dtype().nullability())
         } else {
@@ -66,13 +68,8 @@ impl FoRArray {
     }
 
     #[inline]
-    pub fn reference(&self) -> &ScalarValue {
-        &self.metadata().reference
-    }
-
-    #[inline]
-    pub fn owned_reference_scalar(&self) -> Scalar {
-        Scalar::new(self.dtype().clone(), self.reference().clone())
+    pub fn reference_scalar(&self) -> Scalar {
+        Scalar::new(self.dtype().clone(), self.metadata().reference.clone())
     }
 
     #[inline]
@@ -81,13 +78,13 @@ impl FoRArray {
     }
 }
 
-impl ArrayValidity for FoRArray {
-    fn is_valid(&self, index: usize) -> bool {
-        self.encoded().with_dyn(|a| a.is_valid(index))
+impl ValidityVTable<FoRArray> for FoREncoding {
+    fn is_valid(&self, array: &FoRArray, index: usize) -> bool {
+        array.encoded().is_valid(index)
     }
 
-    fn logical_validity(&self) -> LogicalValidity {
-        self.encoded().with_dyn(|a| a.logical_validity())
+    fn logical_validity(&self, array: &FoRArray) -> LogicalValidity {
+        array.encoded().logical_validity()
     }
 }
 
@@ -97,23 +94,19 @@ impl IntoCanonical for FoRArray {
     }
 }
 
-impl AcceptArrayVisitor for FoRArray {
-    fn accept(&self, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
-        visitor.visit_child("encoded", &self.encoded())
+impl VisitorVTable<FoRArray> for FoREncoding {
+    fn accept(&self, array: &FoRArray, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
+        visitor.visit_child("encoded", &array.encoded())
     }
 }
 
-impl ArrayStatisticsCompute for FoRArray {}
+impl StatisticsVTable<FoRArray> for FoREncoding {}
 
-impl ArrayTrait for FoRArray {
-    fn nbytes(&self) -> usize {
-        self.encoded().nbytes()
-    }
-}
+impl ArrayTrait for FoRArray {}
 
-impl ArrayVariants for FoRArray {
-    fn as_primitive_array(&self) -> Option<&dyn PrimitiveArrayTrait> {
-        Some(self)
+impl VariantsVTable<FoRArray> for FoREncoding {
+    fn as_primitive_array<'a>(&self, array: &'a FoRArray) -> Option<&'a dyn PrimitiveArrayTrait> {
+        Some(array)
     }
 }
 

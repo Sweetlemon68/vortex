@@ -7,81 +7,121 @@
 //! implementations of these operators, else we will decode, and perform the equivalent operator
 //! from Arrow.
 
-pub use boolean::{and, and_kleene, or, or_kleene, AndFn, OrFn};
-pub use compare::{compare, scalar_cmp, CompareFn, MaybeCompareFn, Operator};
-pub use filter::{filter, FilterFn};
+pub use boolean::{
+    and, and_kleene, binary_boolean, or, or_kleene, BinaryBooleanFn, BinaryOperator,
+};
+pub use cast::{try_cast, CastFn};
+pub use compare::{compare, scalar_cmp, CompareFn, Operator};
+pub use fill_forward::{fill_forward, FillForwardFn};
+pub use fill_null::{fill_null, FillNullFn};
+pub use filter::{filter, FilterFn, FilterIter, FilterMask};
+pub use invert::{invert, InvertFn};
+pub use like::{like, LikeFn, LikeOptions};
+pub use scalar_at::{scalar_at, ScalarAtFn};
+pub use scalar_subtract::{subtract_scalar, SubtractScalarFn};
 pub use search_sorted::*;
 pub use slice::{slice, SliceFn};
-pub use take::{take, TakeFn};
-use unary::{CastFn, FillForwardFn, ScalarAtFn, SubtractScalarFn};
-use vortex_error::VortexResult;
+pub use take::{take, TakeFn, TakeOptions};
 
-use crate::Array;
+use crate::ArrayData;
 
 mod boolean;
+mod cast;
 mod compare;
+mod fill_forward;
+mod fill_null;
 mod filter;
+mod invert;
+mod like;
+mod scalar_at;
+mod scalar_subtract;
 mod search_sorted;
 mod slice;
 mod take;
 
-pub mod unary;
+/// VTable for dispatching compute functions to Vortex encodings.
+pub trait ComputeVTable {
+    /// Implementation of binary boolean logic operations.
+    ///
+    /// See: [BinaryBooleanFn].
+    fn binary_boolean_fn(&self) -> Option<&dyn BinaryBooleanFn<ArrayData>> {
+        None
+    }
 
-/// Trait providing compute functions on top of Vortex arrays.
-pub trait ArrayCompute {
     /// Implemented for arrays that can be casted to different types.
     ///
     /// See: [CastFn].
-    fn cast(&self) -> Option<&dyn CastFn> {
+    fn cast_fn(&self) -> Option<&dyn CastFn<ArrayData>> {
         None
     }
 
     /// Binary operator implementation for arrays against other arrays.
     ///
     ///See: [CompareFn].
-    fn compare(&self, _other: &Array, _operator: Operator) -> Option<VortexResult<Array>> {
+    fn compare_fn(&self) -> Option<&dyn CompareFn<ArrayData>> {
         None
     }
 
     /// Array function that returns new arrays a non-null value is repeated across runs of nulls.
     ///
     /// See: [FillForwardFn].
-    fn fill_forward(&self) -> Option<&dyn FillForwardFn> {
+    fn fill_forward_fn(&self) -> Option<&dyn FillForwardFn<ArrayData>> {
         None
     }
 
-    /// Filtering function on arrays of predicates.
+    /// Filter an array with a given mask.
     ///
     /// See: [FilterFn].
-    fn filter(&self) -> Option<&dyn FilterFn> {
+    fn filter_fn(&self) -> Option<&dyn FilterFn<ArrayData>> {
+        None
+    }
+
+    /// Invert a boolean array. Converts true -> false, false -> true, null -> null.
+    ///
+    /// See [InvertFn]
+    fn invert_fn(&self) -> Option<&dyn InvertFn<ArrayData>> {
+        None
+    }
+
+    /// Perform a SQL LIKE operation on two arrays.
+    ///
+    /// See: [LikeFn].
+    fn like_fn(&self) -> Option<&dyn LikeFn<ArrayData>> {
         None
     }
 
     /// Single item indexing on Vortex arrays.
     ///
     /// See: [ScalarAtFn].
-    fn scalar_at(&self) -> Option<&dyn ScalarAtFn> {
-        None
-    }
-
-    /// Broadcast subtraction of scalar from Vortex array.
-    ///
-    /// See: [SubtractScalarFn].
-    fn subtract_scalar(&self) -> Option<&dyn SubtractScalarFn> {
+    fn scalar_at_fn(&self) -> Option<&dyn ScalarAtFn<ArrayData>> {
         None
     }
 
     /// Perform a search over an ordered array.
     ///
     /// See: [SearchSortedFn].
-    fn search_sorted(&self) -> Option<&dyn SearchSortedFn> {
+    fn search_sorted_fn(&self) -> Option<&dyn SearchSortedFn<ArrayData>> {
+        None
+    }
+
+    /// Perform a search over an ordered array.
+    ///
+    /// See: [SearchSortedUsizeFn].
+    fn search_sorted_usize_fn(&self) -> Option<&dyn SearchSortedUsizeFn<ArrayData>> {
         None
     }
 
     /// Perform zero-copy slicing of an array.
     ///
     /// See: [SliceFn].
-    fn slice(&self) -> Option<&dyn SliceFn> {
+    fn slice_fn(&self) -> Option<&dyn SliceFn<ArrayData>> {
+        None
+    }
+
+    /// Broadcast subtraction of scalar from Vortex array.
+    ///
+    /// See: [SubtractScalarFn].
+    fn subtract_scalar_fn(&self) -> Option<&dyn SubtractScalarFn<ArrayData>> {
         None
     }
 
@@ -89,35 +129,14 @@ pub trait ArrayCompute {
     /// the receiver.
     ///
     /// See: [TakeFn].
-    fn take(&self) -> Option<&dyn TakeFn> {
+    fn take_fn(&self) -> Option<&dyn TakeFn<ArrayData>> {
         None
     }
 
-    /// Perform an Arrow-style boolean AND operation over two arrays
+    /// Fill null values with given desired value. Resulting array is NonNullable
     ///
-    /// See: [AndFn].
-    fn and(&self) -> Option<&dyn AndFn> {
-        None
-    }
-
-    /// Perform a Kleene-style boolean AND operation over two arrays
-    ///
-    /// See: [AndFn].
-    fn and_kleene(&self) -> Option<&dyn AndFn> {
-        None
-    }
-
-    /// Perform an Arrow-style boolean OR operation over two arrays
-    ///
-    /// See: [OrFn].
-    fn or(&self) -> Option<&dyn OrFn> {
-        None
-    }
-
-    /// Perform a Kleene-style boolean OR operation over two arrays
-    ///
-    /// See: [OrFn].
-    fn or_kleene(&self) -> Option<&dyn OrFn> {
+    /// See: [FillNullFn]
+    fn fill_null_fn(&self) -> Option<&dyn FillNullFn<ArrayData>> {
         None
     }
 }

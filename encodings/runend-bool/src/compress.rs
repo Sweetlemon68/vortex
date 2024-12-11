@@ -2,17 +2,11 @@ use std::cmp::min;
 
 use arrow_buffer::buffer::BooleanBuffer;
 use arrow_buffer::BooleanBufferBuilder;
-use num_traits::{AsPrimitive, FromPrimitive};
-use vortex_array::array::{BoolArray, PrimitiveArray};
-use vortex_array::validity::Validity;
-use vortex_array::variants::PrimitiveArrayTrait;
-use vortex_dtype::{match_each_integer_ptype, NativePType};
-use vortex_error::{vortex_panic, VortexExpect as _, VortexResult};
+use num_traits::AsPrimitive;
+use vortex_dtype::NativePType;
+use vortex_error::{vortex_panic, VortexExpect as _};
 
-pub fn runend_bool_encode(elements: &BoolArray) -> (PrimitiveArray, bool) {
-    let (arr, start) = runend_bool_encode_slice(&elements.boolean_buffer());
-    (arr.into(), start)
-}
+use crate::value_at_index;
 
 pub fn runend_bool_encode_slice(elements: &BooleanBuffer) -> (Vec<u64>, bool) {
     let mut iter = elements.set_slices();
@@ -41,25 +35,12 @@ pub fn runend_bool_encode_slice(elements: &BooleanBuffer) -> (Vec<u64>, bool) {
     (ends, first_bool)
 }
 
-pub fn runend_bool_decode(
-    run_ends: &PrimitiveArray,
-    start: bool,
-    validity: Validity,
-    offset: usize,
-    length: usize,
-) -> VortexResult<BoolArray> {
-    match_each_integer_ptype!(run_ends.ptype(), |$E| {
-        let bools = runend_bool_decode_slice::<$E>(run_ends.maybe_null_slice(), start, offset, length);
-        BoolArray::try_new(bools, validity)
-    })
-}
-
-pub fn runend_bool_decode_slice<E: NativePType + AsPrimitive<usize> + FromPrimitive + Ord>(
+#[inline]
+pub fn trimmed_ends_iter<E: NativePType + AsPrimitive<usize> + Ord>(
     run_ends: &[E],
-    start: bool,
     offset: usize,
     length: usize,
-) -> BooleanBuffer {
+) -> impl Iterator<Item = usize> + use<'_, E> {
     let offset_e = E::from_usize(offset).unwrap_or_else(|| {
         vortex_panic!(
             "offset {} cannot be converted to {}",
@@ -74,24 +55,24 @@ pub fn runend_bool_decode_slice<E: NativePType + AsPrimitive<usize> + FromPrimit
             std::any::type_name::<E>()
         )
     });
-    let trimmed_ends = run_ends
+    run_ends
         .iter()
-        .map(|v| *v - offset_e)
-        .map(|v| min(v, length_e));
-
-    let mut decoded = BooleanBufferBuilder::new(length);
-    for (idx, end) in trimmed_ends.enumerate() {
-        decoded.append_n(end.as_() - decoded.len(), value_at_index(idx, start));
-    }
-    BooleanBuffer::from(decoded)
+        .copied()
+        .map(move |v| v - offset_e)
+        .map(move |v| min(v, length_e))
+        .map(|v| v.as_())
 }
 
-pub fn value_at_index(idx: usize, start: bool) -> bool {
-    if idx % 2 == 0 {
-        start
-    } else {
-        !start
+pub fn runend_bool_decode_slice(
+    run_ends_iter: impl Iterator<Item = usize>,
+    start: bool,
+    length: usize,
+) -> BooleanBuffer {
+    let mut decoded = BooleanBufferBuilder::new(length);
+    for (idx, end) in run_ends_iter.enumerate() {
+        decoded.append_n(end - decoded.len(), value_at_index(idx, start));
     }
+    BooleanBuffer::from(decoded)
 }
 
 #[cfg(test)]
@@ -100,14 +81,13 @@ mod test {
     use itertools::Itertools;
     use rand::prelude::StdRng;
     use rand::{Rng, SeedableRng};
-    use vortex_array::array::BoolArray;
-    use vortex_array::compute::SliceFn;
+    use vortex_array::array::{BoolArray, PrimitiveArray};
+    use vortex_array::compute::slice;
     use vortex_array::validity::Validity;
     use vortex_array::IntoArrayVariant;
 
-    use crate::compress::{
-        runend_bool_decode, runend_bool_decode_slice, runend_bool_encode, runend_bool_encode_slice,
-    };
+    use crate::compress::{runend_bool_decode_slice, runend_bool_encode_slice, trimmed_ends_iter};
+    use crate::decode_runend_bool;
 
     #[test]
     fn encode_bool() {
@@ -135,8 +115,9 @@ mod test {
     fn encode_decode_bool() {
         let input = [true, true, false, true, true, false];
         let (ends, start) = runend_bool_encode_slice(&BooleanBuffer::from(input.as_slice()));
+        let ends_iter = trimmed_ends_iter(ends.as_slice(), 0, input.len());
 
-        let decoded = runend_bool_decode_slice(ends.as_slice(), start, 0, input.len());
+        let decoded = runend_bool_decode_slice(ends_iter, start, input.len());
         assert_eq!(decoded, BooleanBuffer::from(input.as_slice()))
     }
 
@@ -144,18 +125,20 @@ mod test {
     fn encode_decode_bool_false_start() {
         let input = [false, false, true, true, false, true, true, false];
         let (ends, start) = runend_bool_encode_slice(&BooleanBuffer::from(input.as_slice()));
+        let ends_iter = trimmed_ends_iter(ends.as_slice(), 0, input.len());
 
-        let decoded = runend_bool_decode_slice(ends.as_slice(), start, 0, input.len());
+        let decoded = runend_bool_decode_slice(ends_iter, start, input.len());
         assert_eq!(decoded, BooleanBuffer::from(input.as_slice()))
     }
 
     #[test]
     fn encode_decode_bool_false_start_long() {
-        let input = vec![true; 1024];
-        // input.extend([false, true, false, true].as_slice());
+        let mut input = vec![true; 1024];
+        input.extend([false, true, false, true].as_slice());
         let (ends, start) = runend_bool_encode_slice(&BooleanBuffer::from(input.as_slice()));
+        let ends_iter = trimmed_ends_iter(ends.as_slice(), 0, input.len());
 
-        let decoded = runend_bool_decode_slice(ends.as_slice(), start, 0, input.len());
+        let decoded = runend_bool_decode_slice(ends_iter, start, input.len());
         assert_eq!(decoded, BooleanBuffer::from(input.as_slice()))
     }
 
@@ -164,8 +147,9 @@ mod test {
         let mut rng = StdRng::seed_from_u64(4352);
         let input = (0..1024 * 4).map(|_x| rng.gen::<bool>()).collect_vec();
         let (ends, start) = runend_bool_encode_slice(&BooleanBuffer::from(input.as_slice()));
+        let ends_iter = trimmed_ends_iter(ends.as_slice(), 0, input.len());
 
-        let decoded = runend_bool_decode_slice(ends.as_slice(), start, 0, input.len());
+        let decoded = runend_bool_decode_slice(ends_iter, start, input.len());
         assert_eq!(decoded, BooleanBuffer::from(input.as_slice()))
     }
 
@@ -173,11 +157,12 @@ mod test {
     fn encode_decode_offset_array() {
         let mut rng = StdRng::seed_from_u64(39451);
         let input = (0..1024 * 8 - 61).map(|_x| rng.gen::<bool>()).collect_vec();
-        let b = BoolArray::from(input.clone());
-        let b = b.slice(3, 1024 * 8 - 66).unwrap().into_bool().unwrap();
-        let (ends, start) = runend_bool_encode(&b);
+        let b = BoolArray::from_iter(input.clone());
+        let b = slice(b, 3, 1024 * 8 - 66).unwrap().into_bool().unwrap();
+        let (ends, start) = runend_bool_encode_slice(&b.boolean_buffer());
+        let ends = PrimitiveArray::from(ends);
 
-        let decoded = runend_bool_decode(&ends, start, Validity::NonNullable, 0, 1024 * 8 - 69)
+        let decoded = decode_runend_bool(&ends, start, Validity::NonNullable, 0, 1024 * 8 - 69)
             .unwrap()
             .into_bool()
             .unwrap()

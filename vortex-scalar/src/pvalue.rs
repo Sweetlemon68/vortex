@@ -6,9 +6,9 @@ use num_traits::NumCast;
 use paste::paste;
 use vortex_dtype::half::f16;
 use vortex_dtype::{NativePType, PType};
-use vortex_error::{vortex_err, VortexError};
+use vortex_error::{vortex_err, VortexError, VortexExpect};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub enum PValue {
     U8(u8),
     U16(u16),
@@ -23,20 +23,39 @@ pub enum PValue {
     F64(f64),
 }
 
+impl PartialEq for PValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::U8(s), o) => o.as_u64().vortex_expect("upcast") == *s as u64,
+            (Self::U16(s), o) => o.as_u64().vortex_expect("upcast") == *s as u64,
+            (Self::U32(s), o) => o.as_u64().vortex_expect("upcast") == *s as u64,
+            (Self::U64(s), o) => o.as_u64().vortex_expect("upcast") == *s,
+            (Self::I8(s), o) => o.as_i64().vortex_expect("upcast") == *s as i64,
+            (Self::I16(s), o) => o.as_i64().vortex_expect("upcast") == *s as i64,
+            (Self::I32(s), o) => o.as_i64().vortex_expect("upcast") == *s as i64,
+            (Self::I64(s), o) => o.as_i64().vortex_expect("upcast") == *s,
+            (Self::F16(s), Self::F16(o)) => s.is_eq(*o),
+            (Self::F32(s), Self::F32(o)) => s.is_eq(*o),
+            (Self::F64(s), Self::F64(o)) => s.is_eq(*o),
+            (..) => false,
+        }
+    }
+}
+
 impl PartialOrd for PValue {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         match (self, other) {
-            (Self::U8(s), Self::U8(o)) => Some(s.compare(*o)),
-            (Self::U16(s), Self::U16(o)) => Some(s.compare(*o)),
-            (Self::U32(s), Self::U32(o)) => Some(s.compare(*o)),
-            (Self::U64(s), Self::U64(o)) => Some(s.compare(*o)),
-            (Self::I8(s), Self::I8(o)) => Some(s.compare(*o)),
-            (Self::I16(s), Self::I16(o)) => Some(s.compare(*o)),
-            (Self::I32(s), Self::I32(o)) => Some(s.compare(*o)),
-            (Self::I64(s), Self::I64(o)) => Some(s.compare(*o)),
-            (Self::F16(s), Self::F16(o)) => Some(s.compare(*o)),
-            (Self::F32(s), Self::F32(o)) => Some(s.compare(*o)),
-            (Self::F64(s), Self::F64(o)) => Some(s.compare(*o)),
+            (Self::U8(s), o) => Some((*s as u64).cmp(&o.as_u64().vortex_expect("upcast"))),
+            (Self::U16(s), o) => Some((*s as u64).cmp(&o.as_u64().vortex_expect("upcast"))),
+            (Self::U32(s), o) => Some((*s as u64).cmp(&o.as_u64().vortex_expect("upcast"))),
+            (Self::U64(s), o) => Some((*s).cmp(&o.as_u64().vortex_expect("upcast"))),
+            (Self::I8(s), o) => Some((*s as i64).cmp(&o.as_i64().vortex_expect("upcast"))),
+            (Self::I16(s), o) => Some((*s as i64).cmp(&o.as_i64().vortex_expect("upcast"))),
+            (Self::I32(s), o) => Some((*s as i64).cmp(&o.as_i64().vortex_expect("upcast"))),
+            (Self::I64(s), o) => Some((*s).cmp(&o.as_i64().vortex_expect("upcast"))),
+            (Self::F16(s), Self::F16(o)) => Some(s.total_compare(*o)),
+            (Self::F32(s), Self::F32(o)) => Some(s.total_compare(*o)),
+            (Self::F64(s), Self::F64(o)) => Some(s.total_compare(*o)),
             (..) => None,
         }
     }
@@ -291,6 +310,8 @@ impl Display for PValue {
 
 #[cfg(test)]
 mod test {
+    use std::cmp::Ordering;
+
     use vortex_dtype::half::f16;
     use vortex_dtype::PType;
 
@@ -312,5 +333,17 @@ mod test {
         assert!(!PValue::F16(f16::from_f32(10.0)).is_instance_of(&PType::F32));
         assert!(!PValue::F16(f16::from_f32(10.0)).is_instance_of(&PType::U16));
         assert!(!PValue::F16(f16::from_f32(10.0)).is_instance_of(&PType::I16));
+    }
+
+    #[test]
+    fn test_compare_different_types() {
+        assert_eq!(
+            PValue::I8(4).partial_cmp(&PValue::I8(5)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            PValue::I8(4).partial_cmp(&PValue::I64(5)),
+            Some(Ordering::Less)
+        );
     }
 }

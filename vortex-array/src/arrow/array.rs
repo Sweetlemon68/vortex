@@ -12,38 +12,37 @@ use arrow_array::types::{
     TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, UInt16Type, UInt32Type,
     UInt64Type, UInt8Type,
 };
-use arrow_array::{BinaryViewArray, GenericByteViewArray, StringViewArray};
+use arrow_array::{BinaryViewArray, GenericByteViewArray, GenericListArray, StringViewArray};
 use arrow_buffer::buffer::{NullBuffer, OffsetBuffer};
-use arrow_buffer::{ArrowNativeType, Buffer, ScalarBuffer};
+use arrow_buffer::{ArrowNativeType, BooleanBuffer, Buffer, ScalarBuffer};
 use arrow_schema::{DataType, TimeUnit as ArrowTimeUnit};
 use itertools::Itertools;
 use vortex_datetime_dtype::TimeUnit;
-use vortex_dtype::{DType, NativePType, PType};
+use vortex_dtype::{DType, NativePType, Nullability, PType};
 use vortex_error::{vortex_panic, VortexExpect as _};
 
 use crate::array::{
-    BoolArray, NullArray, PrimitiveArray, StructArray, TemporalArray, VarBinArray, VarBinViewArray,
+    BoolArray, ListArray, NullArray, PrimitiveArray, StructArray, TemporalArray, VarBinArray,
+    VarBinViewArray,
 };
 use crate::arrow::FromArrowArray;
 use crate::stats::{ArrayStatistics, Stat};
 use crate::validity::Validity;
-use crate::{Array, IntoArray};
+use crate::{ArrayData, IntoArrayData};
 
-impl From<Buffer> for Array {
+impl From<Buffer> for ArrayData {
     fn from(value: Buffer) -> Self {
         PrimitiveArray::new(value.into(), PType::U8, Validity::NonNullable).into_array()
     }
 }
 
-impl From<NullBuffer> for Array {
-    fn from(value: NullBuffer) -> Self {
-        BoolArray::try_new(value.into_inner(), Validity::NonNullable)
-            .vortex_expect("Failed to convert null buffer to BoolArray")
-            .into_array()
+impl From<BooleanBuffer> for ArrayData {
+    fn from(value: BooleanBuffer) -> Self {
+        BoolArray::new(value, Nullability::NonNullable).into_array()
     }
 }
 
-impl<T> From<ScalarBuffer<T>> for Array
+impl<T> From<ScalarBuffer<T>> for ArrayData
 where
     T: ArrowNativeType + NativePType,
 {
@@ -52,7 +51,7 @@ where
     }
 }
 
-impl<O> From<OffsetBuffer<O>> for Array
+impl<O> From<OffsetBuffer<O>> for ArrayData
 where
     O: NativePType + OffsetSizeTrait,
 {
@@ -70,7 +69,7 @@ where
     }
 }
 
-impl<T: ArrowPrimitiveType> FromArrowArray<&ArrowPrimitiveArray<T>> for Array
+impl<T: ArrowPrimitiveType> FromArrowArray<&ArrowPrimitiveArray<T>> for ArrayData
 where
     <T as ArrowPrimitiveType>::Native: NativePType,
 {
@@ -82,22 +81,22 @@ where
         );
 
         if T::DATA_TYPE.is_numeric() {
-            return arr.into();
+            return arr.into_array();
         }
 
         match T::DATA_TYPE {
             DataType::Timestamp(time_unit, tz) => {
-                let tz = tz.clone().map(|s| s.to_string());
-                TemporalArray::new_timestamp(arr.into(), time_unit.into(), tz).into()
+                let tz = tz.map(|s| s.to_string());
+                TemporalArray::new_timestamp(arr.into_array(), time_unit.into(), tz).into()
             }
             DataType::Time32(time_unit) => {
-                TemporalArray::new_time(arr.into(), time_unit.into()).into()
+                TemporalArray::new_time(arr.into_array(), time_unit.into()).into()
             }
             DataType::Time64(time_unit) => {
-                TemporalArray::new_time(arr.into(), time_unit.into()).into()
+                TemporalArray::new_time(arr.into_array(), time_unit.into()).into()
             }
-            DataType::Date32 => TemporalArray::new_date(arr.into(), TimeUnit::D).into(),
-            DataType::Date64 => TemporalArray::new_date(arr.into(), TimeUnit::Ms).into(),
+            DataType::Date32 => TemporalArray::new_date(arr.into_array(), TimeUnit::D).into(),
+            DataType::Date64 => TemporalArray::new_date(arr.into_array(), TimeUnit::Ms).into(),
             DataType::Duration(_) => unimplemented!(),
             DataType::Interval(_) => unimplemented!(),
             _ => vortex_panic!("Invalid data type for PrimitiveArray: {}", T::DATA_TYPE),
@@ -105,7 +104,7 @@ where
     }
 }
 
-impl<T: ByteArrayType> FromArrowArray<&GenericByteArray<T>> for Array
+impl<T: ByteArrayType> FromArrowArray<&GenericByteArray<T>> for ArrayData
 where
     <T as ByteArrayType>::Offset: NativePType,
 {
@@ -122,11 +121,11 @@ where
             nulls(value.nulls(), nullable),
         )
         .vortex_expect("Failed to convert Arrow GenericByteArray to Vortex VarBinArray")
-        .into()
+        .into_array()
     }
 }
 
-impl<T: ByteViewType> FromArrowArray<&GenericByteViewArray<T>> for Array {
+impl<T: ByteViewType> FromArrowArray<&GenericByteViewArray<T>> for ArrayData {
     fn from_arrow(value: &GenericByteViewArray<T>, nullable: bool) -> Self {
         let dtype = match T::DATA_TYPE {
             DataType::BinaryView => DType::Binary(nullable.into()),
@@ -144,19 +143,19 @@ impl<T: ByteViewType> FromArrowArray<&GenericByteViewArray<T>> for Array {
             nulls(value.nulls(), nullable),
         )
         .vortex_expect("Failed to convert Arrow GenericByteViewArray to Vortex VarBinViewArray")
-        .into()
+        .into_array()
     }
 }
 
-impl FromArrowArray<&ArrowBooleanArray> for Array {
+impl FromArrowArray<&ArrowBooleanArray> for ArrayData {
     fn from_arrow(value: &ArrowBooleanArray, nullable: bool) -> Self {
         BoolArray::try_new(value.values().clone(), nulls(value.nulls(), nullable))
-            .vortex_expect("Failed to convert Arrow BooleanArray to Vortex BoolArray")
-            .into()
+            .vortex_expect("Validity length cannot mismatch")
+            .into_array()
     }
 }
 
-impl FromArrowArray<&ArrowStructArray> for Array {
+impl FromArrowArray<&ArrowStructArray> for ArrayData {
     fn from_arrow(value: &ArrowStructArray, nullable: bool) -> Self {
         StructArray::try_new(
             value
@@ -175,14 +174,27 @@ impl FromArrowArray<&ArrowStructArray> for Array {
             nulls(value.nulls(), nullable),
         )
         .vortex_expect("Failed to convert Arrow StructArray to Vortex StructArray")
-        .into()
+        .into_array()
     }
 }
 
-impl FromArrowArray<&ArrowNullArray> for Array {
+impl<O: OffsetSizeTrait + NativePType> FromArrowArray<&GenericListArray<O>> for ArrayData {
+    fn from_arrow(value: &GenericListArray<O>, nullable: bool) -> Self {
+        ListArray::try_new(
+            Self::from_arrow(value.values().clone(), value.values().is_nullable()),
+            // offsets are always non-nullable
+            ArrayData::from(value.offsets().clone()),
+            nulls(value.nulls(), nullable),
+        )
+        .vortex_expect("Failed to convert Arrow StructArray to Vortex StructArray")
+        .into_array()
+    }
+}
+
+impl FromArrowArray<&ArrowNullArray> for ArrayData {
     fn from_arrow(value: &ArrowNullArray, nullable: bool) -> Self {
         assert!(nullable);
-        NullArray::new(value.len()).into()
+        NullArray::new(value.len()).into_array()
     }
 }
 
@@ -198,12 +210,12 @@ fn nulls(nulls: Option<&NullBuffer>, nullable: bool) -> Validity {
             })
             .unwrap_or_else(|| Validity::AllValid)
     } else {
-        // assert!(nulls.is_none()); // This does not hold for slices
+        assert!(nulls.map(|x| x.null_count() == 0).unwrap_or(true));
         Validity::NonNullable
     }
 }
 
-impl FromArrowArray<ArrowArrayRef> for Array {
+impl FromArrowArray<ArrowArrayRef> for ArrayData {
     fn from_arrow(array: ArrowArrayRef, nullable: bool) -> Self {
         match array.data_type() {
             DataType::Boolean => Self::from_arrow(array.as_boolean(), nullable),
@@ -237,6 +249,8 @@ impl FromArrowArray<ArrowArrayRef> for Array {
                 nullable,
             ),
             DataType::Struct(_) => Self::from_arrow(array.as_struct(), nullable),
+            DataType::List(_) => Self::from_arrow(array.as_list::<i32>(), nullable),
+            DataType::LargeList(_) => Self::from_arrow(array.as_list::<i64>(), nullable),
             DataType::Null => Self::from_arrow(as_null_array(&array), nullable),
             DataType::Timestamp(u, _) => match u {
                 ArrowTimeUnit::Second => {
@@ -287,7 +301,7 @@ impl FromArrowArray<ArrowArrayRef> for Array {
                 }
             },
             _ => vortex_panic!(
-                "Array encoding not implementedfor Arrow data type {}",
+                "Array encoding not implemented for Arrow data type {}",
                 array.data_type().clone()
             ),
         }

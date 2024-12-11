@@ -8,6 +8,7 @@ mod binary;
 mod column;
 pub mod datafusion;
 mod identity;
+mod like;
 mod literal;
 mod not;
 mod operators;
@@ -16,23 +17,24 @@ mod select;
 pub use binary::*;
 pub use column::*;
 pub use identity::*;
+pub use like::*;
 pub use literal::*;
 pub use not::*;
 pub use operators::*;
 pub use select::*;
-use vortex_array::Array;
+use vortex_array::ArrayData;
 use vortex_dtype::field::Field;
 use vortex_error::{VortexExpect, VortexResult};
 
 pub type ExprRef = Arc<dyn VortexExpr>;
 
-/// Represents logical operation on [`Array`]s
+/// Represents logical operation on [`ArrayData`]s
 pub trait VortexExpr: Debug + Send + Sync + PartialEq<dyn Any> + Display {
     /// Convert expression reference to reference of [`Any`] type
     fn as_any(&self) -> &dyn Any;
 
     /// Compute result of expression on given batch producing a new batch
-    fn evaluate(&self, batch: &Array) -> VortexResult<Array>;
+    fn evaluate(&self, batch: &ArrayData) -> VortexResult<ArrayData>;
 
     /// Accumulate all field references from this expression and its children in the provided set
     fn collect_references<'a>(&'a self, _references: &mut HashSet<&'a Field>) {}
@@ -83,7 +85,7 @@ pub fn unbox_any(any: &dyn Any) -> &dyn Any {
 mod tests {
     use vortex_dtype::field::Field;
     use vortex_dtype::{DType, Nullability, PType, StructDType};
-    use vortex_scalar::{Scalar, ScalarValue};
+    use vortex_scalar::Scalar;
 
     use super::*;
 
@@ -200,7 +202,7 @@ mod tests {
         );
 
         assert_eq!(
-            Literal::new_expr(Scalar::new(
+            Literal::new_expr(Scalar::struct_(
                 DType::Struct(
                     StructDType::new(
                         Arc::from([Arc::from("dog"), Arc::from("cat")]),
@@ -211,10 +213,7 @@ mod tests {
                     ),
                     Nullability::NonNullable
                 ),
-                ScalarValue::List(Arc::from([
-                    ScalarValue::from(32_u32),
-                    ScalarValue::from("rufus".to_string())
-                ]))
+                vec![Scalar::from(32_u32), Scalar::from("rufus".to_string())]
             ))
             .to_string(),
             "{dog:32_u32,cat:rufus}"

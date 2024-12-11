@@ -1,30 +1,29 @@
 use croaring::Bitmap;
-use vortex_array::compute::unary::ScalarAtFn;
-use vortex_array::compute::{ArrayCompute, SliceFn};
-use vortex_array::{Array, IntoArray};
+use vortex_array::compute::{ComputeVTable, ScalarAtFn, SliceFn};
+use vortex_array::{ArrayData, ArrayLen, IntoArrayData};
 use vortex_dtype::PType;
-use vortex_error::{vortex_err, VortexResult, VortexUnwrap as _};
+use vortex_error::{vortex_err, VortexResult};
 use vortex_scalar::Scalar;
 
-use crate::RoaringIntArray;
+use crate::{RoaringIntArray, RoaringIntEncoding};
 
-impl ArrayCompute for RoaringIntArray {
-    fn scalar_at(&self) -> Option<&dyn ScalarAtFn> {
+impl ComputeVTable for RoaringIntEncoding {
+    fn scalar_at_fn(&self) -> Option<&dyn ScalarAtFn<ArrayData>> {
         Some(self)
     }
 
-    fn slice(&self) -> Option<&dyn SliceFn> {
+    fn slice_fn(&self) -> Option<&dyn SliceFn<ArrayData>> {
         Some(self)
     }
 }
 
-impl ScalarAtFn for RoaringIntArray {
-    fn scalar_at(&self, index: usize) -> VortexResult<Scalar> {
-        let bitmap_value = self
+impl ScalarAtFn<RoaringIntArray> for RoaringIntEncoding {
+    fn scalar_at(&self, array: &RoaringIntArray, index: usize) -> VortexResult<Scalar> {
+        let bitmap_value = array
             .owned_bitmap()
             .select(index as u32)
-            .ok_or_else(|| vortex_err!(OutOfBounds: index, 0, self.len()))?;
-        let scalar: Scalar = match self.metadata().ptype {
+            .ok_or_else(|| vortex_err!(OutOfBounds: index, 0, array.len()))?;
+        let scalar: Scalar = match array.metadata().ptype {
             PType::U8 => (bitmap_value as u8).into(),
             PType::U16 => (bitmap_value as u16).into(),
             PType::U32 => bitmap_value.into(),
@@ -33,36 +32,31 @@ impl ScalarAtFn for RoaringIntArray {
         };
         Ok(scalar)
     }
-
-    fn scalar_at_unchecked(&self, index: usize) -> Scalar {
-        <Self as ScalarAtFn>::scalar_at(self, index).vortex_unwrap()
-    }
 }
 
-impl SliceFn for RoaringIntArray {
-    fn slice(&self, start: usize, stop: usize) -> VortexResult<Array> {
-        let mut bitmap = self.owned_bitmap();
+impl SliceFn<RoaringIntArray> for RoaringIntEncoding {
+    fn slice(&self, array: &RoaringIntArray, start: usize, stop: usize) -> VortexResult<ArrayData> {
+        let mut bitmap = array.owned_bitmap();
         let start = bitmap
             .select(start as u32)
-            .ok_or_else(|| vortex_err!(OutOfBounds: start, 0, self.len()))?;
-        let stop_inclusive = if stop == self.len() {
+            .ok_or_else(|| vortex_err!(OutOfBounds: start, 0, array.len()))?;
+        let stop_inclusive = if stop == array.len() {
             bitmap.maximum().unwrap_or(0)
         } else {
             bitmap
                 .select(stop.saturating_sub(1) as u32)
-                .ok_or_else(|| vortex_err!(OutOfBounds: stop, 0, self.len()))?
+                .ok_or_else(|| vortex_err!(OutOfBounds: stop, 0, array.len()))?
         };
 
         bitmap.and_inplace(&Bitmap::from_range(start..=stop_inclusive));
-        Self::try_new(bitmap, self.cached_ptype()).map(IntoArray::into_array)
+        RoaringIntArray::try_new(bitmap, array.cached_ptype()).map(IntoArrayData::into_array)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use vortex_array::array::PrimitiveArray;
-    use vortex_array::compute::slice;
-    use vortex_array::compute::unary::scalar_at;
+    use vortex_array::compute::{scalar_at, slice};
 
     use super::*;
 

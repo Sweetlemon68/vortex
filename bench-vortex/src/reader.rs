@@ -2,7 +2,7 @@ use std::fs::File;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use arrow_array::types::Int64Type;
 use arrow_array::{
@@ -27,10 +27,13 @@ use vortex::arrow::FromArrowType;
 use vortex::compress::CompressionStrategy;
 use vortex::dtype::DType;
 use vortex::error::VortexResult;
+use vortex::file::{LayoutContext, LayoutDeserializer, VortexFileWriter, VortexReadBuilder};
+use vortex::io::{IoDispatcher, ObjectStoreReadAt, TokioFile, VortexReadAt, VortexWrite};
 use vortex::sampling_compressor::{SamplingCompressor, ALL_ENCODINGS_CONTEXT};
-use vortex::serde::file::{LayoutContext, LayoutDeserializer, VortexFileWriter, VortexReadBuilder};
-use vortex::serde::io::{ObjectStoreReadAt, TokioFile, VortexReadAt, VortexWrite};
-use vortex::{Array, IntoArray, IntoCanonical};
+use vortex::{ArrayData, IntoArrayData, IntoCanonical};
+
+static DISPATCHER: LazyLock<Arc<IoDispatcher>> =
+    LazyLock::new(|| Arc::new(IoDispatcher::default()));
 
 pub const BATCH_SIZE: usize = 65_536;
 
@@ -41,7 +44,7 @@ pub struct VortexFooter {
     pub dtype_range: Range<u64>,
 }
 
-pub async fn open_vortex(path: &Path) -> VortexResult<Array> {
+pub async fn open_vortex(path: &Path) -> VortexResult<ArrayData> {
     let file = TokioFile::open(path).unwrap();
 
     VortexReadBuilder::new(
@@ -51,6 +54,7 @@ pub async fn open_vortex(path: &Path) -> VortexResult<Array> {
             LayoutContext::default().into(),
         ),
     )
+    .with_io_dispatcher(DISPATCHER.clone())
     .build()
     .await?
     .read_all()
@@ -79,12 +83,12 @@ pub fn read_parquet_to_vortex<P: AsRef<Path>>(parquet_path: P) -> VortexResult<C
     let dtype = DType::from_arrow(reader.schema());
     let chunks = reader
         .map(|batch_result| batch_result.unwrap())
-        .map(Array::try_from)
+        .map(ArrayData::try_from)
         .collect::<VortexResult<Vec<_>>>()?;
     ChunkedArray::try_new(chunks, dtype)
 }
 
-pub fn compress_parquet_to_vortex(parquet_path: &Path) -> VortexResult<Array> {
+pub fn compress_parquet_to_vortex(parquet_path: &Path) -> VortexResult<ArrayData> {
     let chunked = read_parquet_to_vortex(parquet_path)?;
     CompressionStrategy::compress(&SamplingCompressor::default(), &chunked.into_array())
 }
@@ -111,7 +115,7 @@ pub fn write_csv_as_parquet(csv_path: PathBuf, output_path: &Path) -> VortexResu
 async fn take_vortex<T: VortexReadAt + Unpin + 'static>(
     reader: T,
     indices: &[u64],
-) -> VortexResult<Array> {
+) -> VortexResult<ArrayData> {
     VortexReadBuilder::new(
         reader,
         LayoutDeserializer::new(
@@ -119,25 +123,26 @@ async fn take_vortex<T: VortexReadAt + Unpin + 'static>(
             LayoutContext::default().into(),
         ),
     )
-    .with_indices(Array::from(indices.to_vec()))
+    .with_io_dispatcher(DISPATCHER.clone())
+    .with_indices(ArrayData::from(indices.to_vec()))
     .build()
     .await?
     .read_all()
     .await
     // For equivalence.... we decompress to make sure we're not cheating too much.
     .and_then(IntoCanonical::into_canonical)
-    .map(Array::from)
+    .map(ArrayData::from)
 }
 
 pub async fn take_vortex_object_store(
     fs: Arc<dyn ObjectStore>,
     path: object_store::path::Path,
     indices: &[u64],
-) -> VortexResult<Array> {
+) -> VortexResult<ArrayData> {
     take_vortex(ObjectStoreReadAt::new(fs.clone(), path), indices).await
 }
 
-pub async fn take_vortex_tokio(path: &Path, indices: &[u64]) -> VortexResult<Array> {
+pub async fn take_vortex_tokio(path: &Path, indices: &[u64]) -> VortexResult<ArrayData> {
     take_vortex(TokioFile::open(path)?, indices).await
 }
 

@@ -2,7 +2,7 @@
 //!
 //! See [message] and [footer] for the flatbuffer specifications.
 //!
-//! See the `vortex-serde` crate for non-contiguous serialization.
+//! See the `vortex-file` crate for non-contiguous serialization.
 
 #[cfg(feature = "array")]
 #[allow(clippy::all)]
@@ -92,7 +92,7 @@ pub mod scalar;
 /// ```
 pub mod footer;
 
-#[cfg(feature = "file")]
+#[cfg(feature = "ipc")]
 #[allow(clippy::all)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[allow(clippy::many_single_char_names)]

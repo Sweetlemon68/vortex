@@ -2,36 +2,57 @@
 
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
+use std::sync::Arc;
 
-use enum_iterator::Sequence;
+use arrow_buffer::{BooleanBuffer, BooleanBufferBuilder, Buffer, MutableBuffer};
+use enum_iterator::{cardinality, Sequence};
+use enum_map::Enum;
 use itertools::Itertools;
+use log::debug;
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 pub use statsset::*;
 use vortex_dtype::Nullability::NonNullable;
-use vortex_dtype::{DType, NativePType};
-use vortex_error::{vortex_panic, VortexError, VortexResult};
+use vortex_dtype::{DType, NativePType, PType};
+use vortex_error::{vortex_err, vortex_panic, VortexError, VortexExpect, VortexResult};
 use vortex_scalar::Scalar;
 
-use crate::Array;
+use crate::encoding::Encoding;
+use crate::ArrayData;
 
 pub mod flatbuffers;
 mod statsset;
 
 /// Statistics that are used for pruning files (i.e., we want to ensure they are computed when compressing/writing).
-pub(crate) const PRUNING_STATS: &[Stat] = &[Stat::Min, Stat::Max, Stat::TrueCount, Stat::NullCount];
+pub const PRUNING_STATS: &[Stat] = &[Stat::Min, Stat::Max, Stat::TrueCount, Stat::NullCount];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Sequence)]
-#[non_exhaustive]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Sequence, Enum, IntoPrimitive, TryFromPrimitive,
+)]
+#[repr(u8)]
 pub enum Stat {
+    /// Frequency of each bit width (nulls are treated as 0)
     BitWidthFreq,
+    /// Frequency of each trailing zero (nulls are treated as 0)
     TrailingZeroFreq,
+    /// Whether all values are the same (nulls are not equal to other non-null values,
+    /// so this is true iff all values are null or all values are the same non-null value)
     IsConstant,
+    /// Whether the non-null values in the array are sorted (i.e., we skip nulls)
     IsSorted,
+    /// Whether the non-null values in the array are strictly sorted (i.e., sorted with no duplicates)
     IsStrictSorted,
+    /// The maximum value in the array (ignoring nulls, unless all values are null)
     Max,
+    /// The minimum value in the array (ignoring nulls, unless all values are null)
     Min,
+    /// The number of runs in the array (ignoring nulls)
     RunCount,
+    /// The number of true values in the array (nulls are treated as false)
     TrueCount,
+    /// The number of null values in the array
     NullCount,
+    /// The uncompressed size of the array in bytes
+    UncompressedSizeInBytes,
 }
 
 impl Stat {
@@ -47,6 +68,7 @@ impl Stat {
                 | Stat::Min
                 | Stat::TrueCount
                 | Stat::NullCount
+                | Stat::UncompressedSizeInBytes
         )
     }
 
@@ -54,22 +76,81 @@ impl Stat {
     pub fn has_same_dtype_as_array(&self) -> bool {
         matches!(self, Stat::Min | Stat::Max)
     }
+
+    pub fn dtype(&self, data_type: &DType) -> DType {
+        match self {
+            Stat::BitWidthFreq => DType::List(
+                Arc::new(DType::Primitive(PType::U64, NonNullable)),
+                NonNullable,
+            ),
+            Stat::TrailingZeroFreq => DType::List(
+                Arc::new(DType::Primitive(PType::U64, NonNullable)),
+                NonNullable,
+            ),
+            Stat::IsConstant => DType::Bool(NonNullable),
+            Stat::IsSorted => DType::Bool(NonNullable),
+            Stat::IsStrictSorted => DType::Bool(NonNullable),
+            Stat::Max => data_type.clone(),
+            Stat::Min => data_type.clone(),
+            Stat::RunCount => DType::Primitive(PType::U64, NonNullable),
+            Stat::TrueCount => DType::Primitive(PType::U64, NonNullable),
+            Stat::NullCount => DType::Primitive(PType::U64, NonNullable),
+            Stat::UncompressedSizeInBytes => DType::Primitive(PType::U64, NonNullable),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Self::BitWidthFreq => "bit_width_frequency",
+            Self::TrailingZeroFreq => "trailing_zero_frequency",
+            Self::IsConstant => "is_constant",
+            Self::IsSorted => "is_sorted",
+            Self::IsStrictSorted => "is_strict_sorted",
+            Self::Max => "max",
+            Self::Min => "min",
+            Self::RunCount => "run_count",
+            Self::TrueCount => "true_count",
+            Self::NullCount => "null_count",
+            Self::UncompressedSizeInBytes => "uncompressed_size_in_bytes",
+        }
+    }
+}
+
+pub fn as_stat_bitset_bytes(stats: &[Stat]) -> Vec<u8> {
+    let stat_count = cardinality::<Stat>();
+    let mut stat_bitset = BooleanBufferBuilder::new_from_buffer(
+        MutableBuffer::from_len_zeroed(stat_count.div_ceil(8)),
+        stat_count,
+    );
+    for stat in stats {
+        stat_bitset.set_bit(u8::from(*stat) as usize, true);
+    }
+
+    stat_bitset
+        .finish()
+        .into_inner()
+        .into_vec()
+        .unwrap_or_else(|b| b.to_vec())
+}
+
+pub fn stats_from_bitset_bytes(bytes: &[u8]) -> Vec<Stat> {
+    BooleanBuffer::new(Buffer::from(bytes), 0, bytes.len() * 8)
+        .set_indices()
+        // Filter out indices failing conversion, these are stats written by newer version of library
+        .filter_map(|i| {
+            let Ok(stat) = u8::try_from(i) else {
+                debug!("invalid stat encountered: {i}");
+                return None;
+            };
+
+            Stat::try_from(stat).ok()
+        })
+        .collect::<Vec<_>>()
 }
 
 impl Display for Stat {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::BitWidthFreq => write!(f, "bit_width_frequency"),
-            Self::TrailingZeroFreq => write!(f, "trailing_zero_frequency"),
-            Self::IsConstant => write!(f, "is_constant"),
-            Self::IsSorted => write!(f, "is_sorted"),
-            Self::IsStrictSorted => write!(f, "is_strict_sorted"),
-            Self::Max => write!(f, "max"),
-            Self::Min => write!(f, "min"),
-            Self::RunCount => write!(f, "run_count"),
-            Self::TrueCount => write!(f, "true_count"),
-            Self::NullCount => write!(f, "null_count"),
-        }
+        write!(f, "{}", self.name())
     }
 }
 
@@ -80,29 +161,57 @@ pub trait Statistics {
     /// Get all existing statistics
     fn to_set(&self) -> StatsSet;
 
+    /// Set the value of the statistic
     fn set(&self, stat: Stat, value: Scalar);
+
+    /// Clear the value of the statistic
+    fn clear(&self, stat: Stat);
 
     /// Computes the value of the stat if it's not present
     fn compute(&self, stat: Stat) -> Option<Scalar>;
 
-    /// Compute all of the requested statistics (if not already present)
+    /// Compute all the requested statistics (if not already present)
     /// Returns a StatsSet with the requested stats and any additional available stats
     fn compute_all(&self, stats: &[Stat]) -> VortexResult<StatsSet> {
+        let mut stats_set = self.to_set();
         for stat in stats {
-            let _ = self.compute(*stat);
+            if let Some(s) = self.compute(*stat) {
+                stats_set.set(*stat, s)
+            }
         }
-        Ok(self.to_set())
+        Ok(stats_set)
     }
+
+    fn retain_only(&self, stats: &[Stat]);
 }
 
 pub trait ArrayStatistics {
     fn statistics(&self) -> &dyn Statistics;
+
+    fn inherit_statistics(&self, parent: &dyn Statistics);
 }
 
-pub trait ArrayStatisticsCompute {
+/// Encoding VTable for computing array statistics.
+pub trait StatisticsVTable<Array: ?Sized> {
     /// Compute the requested statistic. Can return additional stats.
-    fn compute_statistics(&self, _stat: Stat) -> VortexResult<StatsSet> {
-        Ok(StatsSet::new())
+    fn compute_statistics(&self, _array: &Array, _stat: Stat) -> VortexResult<StatsSet> {
+        Ok(StatsSet::default())
+    }
+}
+
+impl<E: Encoding + 'static> StatisticsVTable<ArrayData> for E
+where
+    E: StatisticsVTable<E::Array>,
+    for<'a> &'a E::Array: TryFrom<&'a ArrayData, Error = VortexError>,
+{
+    fn compute_statistics(&self, array: &ArrayData, stat: Stat) -> VortexResult<StatsSet> {
+        let array_ref = <&E::Array>::try_from(array)?;
+        let encoding = array
+            .encoding()
+            .as_any()
+            .downcast_ref::<E>()
+            .ok_or_else(|| vortex_err!("Mismatched encoding"))?;
+        StatisticsVTable::compute_statistics(encoding, array_ref, stat)
     }
 }
 
@@ -208,9 +317,13 @@ impl dyn Statistics + '_ {
     pub fn compute_trailing_zero_freq(&self) -> Option<Vec<usize>> {
         self.compute_as::<Vec<usize>>(Stat::TrailingZeroFreq)
     }
+
+    pub fn compute_uncompressed_size_in_bytes(&self) -> Option<usize> {
+        self.compute_as(Stat::UncompressedSizeInBytes)
+    }
 }
 
-pub fn trailing_zeros(array: &Array) -> u8 {
+pub fn trailing_zeros(array: &ArrayData) -> u8 {
     let tz_freq = array
         .statistics()
         .compute_trailing_zero_freq()
@@ -220,7 +333,9 @@ pub fn trailing_zeros(array: &Array) -> u8 {
         .enumerate()
         .find_or_first(|(_, &v)| v > 0)
         .map(|(i, _)| i)
-        .unwrap_or(0) as u8
+        .unwrap_or(0)
+        .try_into()
+        .vortex_expect("tz_freq must fit in u8")
 }
 
 #[cfg(test)]

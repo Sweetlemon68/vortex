@@ -1,16 +1,17 @@
 use std::fmt::{Debug, Display};
+use std::sync::Arc;
 
 use ::serde::{Deserialize, Serialize};
 pub use compress::*;
 use fastlanes::BitPacking;
-use vortex_array::array::visitor::{AcceptArrayVisitor, ArrayVisitor};
 use vortex_array::array::{PrimitiveArray, SparseArray};
 use vortex_array::encoding::ids;
-use vortex_array::stats::{ArrayStatisticsCompute, StatsSet};
-use vortex_array::validity::{ArrayValidity, LogicalValidity, Validity, ValidityMetadata};
-use vortex_array::variants::{ArrayVariants, PrimitiveArrayTrait};
+use vortex_array::stats::{StatisticsVTable, StatsSet};
+use vortex_array::validity::{LogicalValidity, Validity, ValidityMetadata, ValidityVTable};
+use vortex_array::variants::{PrimitiveArrayTrait, VariantsVTable};
+use vortex_array::visitor::{ArrayVisitor, VisitorVTable};
 use vortex_array::{
-    impl_encoding, Array, ArrayDType, ArrayTrait, Canonical, IntoCanonical, TypedArray,
+    impl_encoding, ArrayDType, ArrayData, ArrayLen, ArrayTrait, Canonical, IntoCanonical,
 };
 use vortex_buffer::Buffer;
 use vortex_dtype::{DType, NativePType, Nullability, PType};
@@ -44,7 +45,7 @@ impl BitPackedArray {
         packed: Buffer,
         ptype: PType,
         validity: Validity,
-        patches: Option<Array>,
+        patches: Option<ArrayData>,
         bit_width: u8,
         len: usize,
     ) -> VortexResult<Self> {
@@ -55,7 +56,7 @@ impl BitPackedArray {
         packed: Buffer,
         ptype: PType,
         validity: Validity,
-        patches: Option<Array>,
+        patches: Option<ArrayData>,
         bit_width: u8,
         length: usize,
         offset: u16,
@@ -97,7 +98,7 @@ impl BitPackedArray {
                 )
             }
 
-            if SparseArray::try_from(parray)?.indices().is_empty() {
+            if SparseArray::try_from(parray.clone())?.indices().is_empty() {
                 vortex_bail!("cannot construct BitPackedArray using patches without indices");
             }
         }
@@ -117,16 +118,16 @@ impl BitPackedArray {
             children.push(a)
         }
 
-        Ok(Self {
-            typed: TypedArray::try_from_parts(
-                dtype,
-                length,
-                metadata,
-                Some(packed),
-                children.into(),
-                StatsSet::new(),
-            )?,
-        })
+        ArrayData::try_new_owned(
+            &BitPackedEncoding,
+            dtype,
+            length,
+            Arc::new(metadata),
+            Some(packed),
+            children.into(),
+            StatsSet::default(),
+        )?
+        .try_into()
     }
 
     #[inline]
@@ -160,7 +161,7 @@ impl BitPackedArray {
     /// If present, patches MUST be a `SparseArray` with equal-length to this array, and whose
     /// indices indicate the locations of patches. The indices must have non-zero length.
     #[inline]
-    pub fn patches(&self) -> Option<Array> {
+    pub fn patches(&self) -> Option<ArrayData> {
         self.metadata().has_patches.then(|| {
             self.as_ref()
                 .child(
@@ -187,8 +188,8 @@ impl BitPackedArray {
         })
     }
 
-    pub fn encode(array: &Array, bit_width: u8) -> VortexResult<Self> {
-        if let Ok(parray) = PrimitiveArray::try_from(array) {
+    pub fn encode(array: &ArrayData, bit_width: u8) -> VortexResult<Self> {
+        if let Ok(parray) = PrimitiveArray::try_from(array.clone()) {
             bitpack_encode(parray, bit_width)
         } else {
             vortex_bail!("Bitpacking can only encode primitive arrays");
@@ -207,39 +208,36 @@ impl IntoCanonical for BitPackedArray {
     }
 }
 
-impl ArrayValidity for BitPackedArray {
-    fn is_valid(&self, index: usize) -> bool {
-        self.validity().is_valid(index)
+impl ValidityVTable<BitPackedArray> for BitPackedEncoding {
+    fn is_valid(&self, array: &BitPackedArray, index: usize) -> bool {
+        array.validity().is_valid(index)
     }
 
-    fn logical_validity(&self) -> LogicalValidity {
-        self.validity().to_logical(self.len())
+    fn logical_validity(&self, array: &BitPackedArray) -> LogicalValidity {
+        array.validity().to_logical(array.len())
     }
 }
 
-impl AcceptArrayVisitor for BitPackedArray {
-    fn accept(&self, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
-        visitor.visit_buffer(self.packed())?;
-        if let Some(patches) = self.patches().as_ref() {
+impl VisitorVTable<BitPackedArray> for BitPackedEncoding {
+    fn accept(&self, array: &BitPackedArray, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
+        visitor.visit_buffer(array.packed())?;
+        if let Some(patches) = array.patches().as_ref() {
             visitor.visit_child("patches", patches)?;
         }
-        visitor.visit_validity(&self.validity())
+        visitor.visit_validity(&array.validity())
     }
 }
 
-impl ArrayStatisticsCompute for BitPackedArray {}
+impl StatisticsVTable<BitPackedArray> for BitPackedEncoding {}
 
-impl ArrayTrait for BitPackedArray {
-    fn nbytes(&self) -> usize {
-        // Ignore any overheads like padding or the bit-width flag.
-        let packed_size = ((self.bit_width() as usize * self.len()) + 7) / 8;
-        packed_size + self.patches().map(|p| p.nbytes()).unwrap_or(0)
-    }
-}
+impl ArrayTrait for BitPackedArray {}
 
-impl ArrayVariants for BitPackedArray {
-    fn as_primitive_array(&self) -> Option<&dyn PrimitiveArrayTrait> {
-        Some(self)
+impl VariantsVTable<BitPackedArray> for BitPackedEncoding {
+    fn as_primitive_array<'a>(
+        &self,
+        array: &'a BitPackedArray,
+    ) -> Option<&'a dyn PrimitiveArrayTrait> {
+        Some(array)
     }
 }
 
@@ -248,7 +246,7 @@ impl PrimitiveArrayTrait for BitPackedArray {}
 #[cfg(test)]
 mod test {
     use vortex_array::array::PrimitiveArray;
-    use vortex_array::{IntoArray, IntoArrayVariant};
+    use vortex_array::{IntoArrayData, IntoArrayVariant};
 
     use crate::BitPackedArray;
 

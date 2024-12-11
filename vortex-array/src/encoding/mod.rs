@@ -1,12 +1,15 @@
 //! Traits and types to define shared unique encoding identifiers.
 
+use std::any::Any;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 
-use vortex_error::{vortex_panic, VortexResult};
-
-use crate::canonical::{Canonical, IntoCanonical};
-use crate::{Array, ArrayDef, ArrayTrait};
+use crate::compute::ComputeVTable;
+use crate::stats::StatisticsVTable;
+use crate::validity::ValidityVTable;
+use crate::variants::VariantsVTable;
+use crate::visitor::VisitorVTable;
+use crate::{ArrayData, ArrayMetadata, IntoCanonicalVTable, MetadataVTable};
 
 pub mod opaque;
 
@@ -18,7 +21,7 @@ pub mod opaque;
 /// 0x0001 - 0x0400 - vortex internal encodings (1 - 1024)
 /// 0x0401 - 0x7FFF - well known extension encodings (1025 - 32767)
 /// 0x8000 - 0xFFFF - custom extension encodings (32768 - 65535)
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq)]
 pub struct EncodingId(&'static str, u16);
 
 impl EncodingId {
@@ -28,6 +31,19 @@ impl EncodingId {
 
     pub const fn code(&self) -> u16 {
         self.1
+    }
+}
+
+// The encoding is identified only by its numeric ID, so we only use that for PartialEq and Hash
+impl PartialEq for EncodingId {
+    fn eq(&self, other: &Self) -> bool {
+        self.1 == other.1
+    }
+}
+
+impl Hash for EncodingId {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.1.hash(state);
     }
 }
 
@@ -43,57 +59,44 @@ impl AsRef<str> for EncodingId {
     }
 }
 
-pub type EncodingRef = &'static dyn ArrayEncoding;
+/// Marker trait for array encodings with their associated Array type.
+pub trait Encoding: 'static {
+    const ID: EncodingId;
 
-/// Object-safe encoding trait for an array.
-pub trait ArrayEncoding: 'static + Sync + Send + Debug {
-    fn id(&self) -> EncodingId;
-
-    /// Flatten the given array.
-    fn canonicalize(&self, array: Array) -> VortexResult<Canonical>;
-
-    /// Unwrap the provided array into an implementation of ArrayTrait
-    fn with_dyn(
-        &self,
-        array: &Array,
-        f: &mut dyn for<'b> FnMut(&'b (dyn ArrayTrait + 'b)) -> VortexResult<()>,
-    ) -> VortexResult<()>;
+    type Array;
+    type Metadata: ArrayMetadata;
 }
 
-impl PartialEq for dyn ArrayEncoding + '_ {
+pub type EncodingRef = &'static dyn EncodingVTable;
+
+/// Object-safe encoding trait for an array.
+pub trait EncodingVTable:
+    'static
+    + Sync
+    + Send
+    + Debug
+    + IntoCanonicalVTable
+    + MetadataVTable
+    + ComputeVTable
+    + StatisticsVTable<ArrayData>
+    + ValidityVTable<ArrayData>
+    + VariantsVTable<ArrayData>
+    + VisitorVTable<ArrayData>
+{
+    fn id(&self) -> EncodingId;
+
+    fn as_any(&self) -> &dyn Any;
+}
+
+impl PartialEq for dyn EncodingVTable + '_ {
     fn eq(&self, other: &Self) -> bool {
         self.id() == other.id()
     }
 }
-impl Eq for dyn ArrayEncoding + '_ {}
-impl Hash for dyn ArrayEncoding + '_ {
+impl Eq for dyn EncodingVTable + '_ {}
+impl Hash for dyn EncodingVTable + '_ {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.id().hash(state)
-    }
-}
-
-/// Non-object-safe extensions to the ArrayEncoding trait.
-pub trait ArrayEncodingExt {
-    type D: ArrayDef;
-
-    fn into_canonical(array: Array) -> VortexResult<Canonical> {
-        let typed = <<Self::D as ArrayDef>::Array as TryFrom<Array>>::try_from(array)?;
-        IntoCanonical::into_canonical(typed)
-    }
-
-    fn with_dyn<R, F>(array: &Array, mut f: F) -> R
-    where
-        F: for<'b> FnMut(&'b (dyn ArrayTrait + 'b)) -> R,
-    {
-        let typed = <<Self::D as ArrayDef>::Array as TryFrom<Array>>::try_from(array.clone())
-            .unwrap_or_else(|err| {
-                vortex_panic!(
-                    err,
-                    "Failed to convert array to {}",
-                    std::any::type_name::<<Self::D as ArrayDef>::Array>()
-                )
-            });
-        f(&typed)
     }
 }
 
@@ -119,10 +122,10 @@ pub mod ids {
     pub const SPARSE: u16 = 8;
     pub const CONSTANT: u16 = 9;
     pub const CHUNKED: u16 = 10;
+    pub const LIST: u16 = 11;
 
     // currently unused, saved for future built-ins
-    // e.g., List, FixedList, Union, Tensor, etc.
-    pub(crate) const RESERVED_11: u16 = 11;
+    // e.g., FixedList, Union, Tensor, etc.
     pub(crate) const RESERVED_12: u16 = 12;
     pub(crate) const RESERVED_13: u16 = 13;
     pub(crate) const RESERVED_14: u16 = 14;
@@ -147,8 +150,9 @@ pub mod ids {
 }
 
 #[cfg(test)]
+#[allow(clippy::cast_possible_truncation)]
 mod tests {
-    use super::ids;
+    use super::{ids, EncodingId};
     use crate::aliases::hash_set::HashSet;
 
     #[test]
@@ -165,7 +169,7 @@ mod tests {
             ids::SPARSE,
             ids::CONSTANT,
             ids::CHUNKED,
-            ids::RESERVED_11,
+            ids::LIST,
             ids::RESERVED_12,
             ids::RESERVED_13,
             ids::RESERVED_14,
@@ -194,5 +198,15 @@ mod tests {
             // monotonic with no gaps
             assert_eq!(i as u16, *id, "id at index {} is not equal to index", i);
         }
+    }
+
+    #[test]
+    fn test_encoding_id_eq() {
+        let fizz = EncodingId::new("fizz", 0);
+        let buzz = EncodingId::new("buzz", 0);
+        let fizzbuzz = EncodingId::new("fizzbuzz", 1);
+
+        assert_eq!(fizz, buzz);
+        assert_ne!(fizz, fizzbuzz);
     }
 }

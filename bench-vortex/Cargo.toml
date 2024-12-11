@@ -41,11 +41,12 @@ homedir = { workspace = true }
 humansize = { workspace = true }
 indicatif = { workspace = true }
 itertools = { workspace = true }
-log = { workspace = true }
+log = { workspace = true, features = ["max_level_debug"] }
 mimalloc = { workspace = true }
 object_store = { workspace = true, features = ["aws"] }
 parquet = { workspace = true, features = ["async"] }
 prettytable-rs = { workspace = true }
+tabled = { workspace = true, features = ["std"] }
 rand = { workspace = true }
 rayon = { workspace = true }
 regex = { workspace = true }
@@ -69,7 +70,7 @@ test = false
 bench = false
 
 [[bench]]
-name = "compress_noci"
+name = "compress"
 test = false
 harness = false
 
@@ -95,5 +96,10 @@ harness = false
 
 [[bench]]
 name = "compressor_throughput"
+test = false
+harness = false
+
+[[bench]]
+name = "clickbench"
 test = false
 harness = false

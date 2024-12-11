@@ -1,13 +1,14 @@
 use vortex_array::aliases::hash_set::HashSet;
-use vortex_array::array::Primitive;
-use vortex_array::encoding::EncodingRef;
+use vortex_array::array::PrimitiveEncoding;
+use vortex_array::encoding::{Encoding, EncodingRef};
 use vortex_array::stats::ArrayStatistics;
-use vortex_array::{Array, ArrayDef, IntoArray};
+use vortex_array::{ArrayData, IntoArrayData, IntoArrayVariant};
 use vortex_error::VortexResult;
 use vortex_runend::compress::runend_encode;
-use vortex_runend::{RunEnd, RunEndArray, RunEndEncoding};
+use vortex_runend::{RunEndArray, RunEndEncoding};
 
 use crate::compressors::{CompressedArray, CompressionTree, EncodingCompressor};
+use crate::downscale::downscale_integer_array;
 use crate::{constants, SamplingCompressor};
 
 pub const DEFAULT_RUN_END_COMPRESSOR: RunEndCompressor = RunEndCompressor { ree_threshold: 2.0 };
@@ -19,15 +20,15 @@ pub struct RunEndCompressor {
 
 impl EncodingCompressor for RunEndCompressor {
     fn id(&self) -> &str {
-        RunEnd::ID.as_ref()
+        RunEndEncoding::ID.as_ref()
     }
 
     fn cost(&self) -> u8 {
         constants::RUN_END_COST
     }
 
-    fn can_compress(&self, array: &Array) -> Option<&dyn EncodingCompressor> {
-        if array.encoding().id() != Primitive::ID {
+    fn can_compress(&self, array: &ArrayData) -> Option<&dyn EncodingCompressor> {
+        if !array.is_encoding(PrimitiveEncoding::ID) {
             return None;
         }
 
@@ -45,13 +46,14 @@ impl EncodingCompressor for RunEndCompressor {
 
     fn compress<'a>(
         &'a self,
-        array: &Array,
+        array: &ArrayData,
         like: Option<CompressionTree<'a>>,
         ctx: SamplingCompressor<'a>,
     ) -> VortexResult<CompressedArray<'a>> {
-        let primitive_array = array.as_primitive();
-
+        let primitive_array = array.clone().into_primitive()?;
         let (ends, values) = runend_encode(&primitive_array);
+        let ends = downscale_integer_array(ends.into_array())?.into_primitive()?;
+
         let compressed_ends = ctx
             .auxiliary("ends")
             .compress(&ends.into_array(), like.as_ref().and_then(|l| l.child(0)))?;
@@ -71,7 +73,7 @@ impl EncodingCompressor for RunEndCompressor {
                 self,
                 vec![compressed_ends.path, compressed_values.path],
             )),
-            Some(array.statistics()),
+            array,
         ))
     }
 

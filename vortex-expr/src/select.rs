@@ -3,7 +3,7 @@ use std::fmt::Display;
 
 use itertools::Itertools;
 use vortex_array::aliases::hash_set::HashSet;
-use vortex_array::Array;
+use vortex_array::ArrayData;
 use vortex_dtype::field::Field;
 use vortex_error::{vortex_err, VortexResult};
 
@@ -39,35 +39,33 @@ impl VortexExpr for Select {
         self
     }
 
-    fn evaluate(&self, batch: &Array) -> VortexResult<Array> {
-        batch.with_dyn(|s| {
-            let st = s
-                .as_struct_array()
-                .ok_or_else(|| vortex_err!("Not a struct array"))?;
-            match self {
-                Select::Include(f) => st.project(f),
-                Select::Exclude(e) => {
-                    let normalized_exclusion = e
-                        .iter()
-                        .map(|ef| match ef {
-                            Field::Name(n) => Ok(n.as_str()),
-                            Field::Index(i) => st
-                                .names()
-                                .get(*i)
-                                .map(|s| &**s)
-                                .ok_or_else(|| vortex_err!("Column doesn't exist")),
-                        })
-                        .collect::<VortexResult<HashSet<_>>>()?;
-                    let included_names = st
-                        .names()
-                        .iter()
-                        .filter(|f| !normalized_exclusion.contains(&&***f))
-                        .map(|f| Field::from(&**f))
-                        .collect::<Vec<_>>();
-                    st.project(&included_names)
-                }
+    fn evaluate(&self, batch: &ArrayData) -> VortexResult<ArrayData> {
+        let st = batch
+            .as_struct_array()
+            .ok_or_else(|| vortex_err!("Not a struct array"))?;
+        match self {
+            Select::Include(f) => st.project(f),
+            Select::Exclude(e) => {
+                let normalized_exclusion = e
+                    .iter()
+                    .map(|ef| match ef {
+                        Field::Name(n) => Ok(n.as_str()),
+                        Field::Index(i) => st
+                            .names()
+                            .get(*i)
+                            .map(|s| &**s)
+                            .ok_or_else(|| vortex_err!("Column doesn't exist")),
+                    })
+                    .collect::<VortexResult<HashSet<_>>>()?;
+                let included_names = st
+                    .names()
+                    .iter()
+                    .filter(|f| !normalized_exclusion.contains(&&***f))
+                    .map(|f| Field::from(&**f))
+                    .collect::<Vec<_>>();
+                st.project(&included_names)
             }
-        })
+        }
     }
 
     fn collect_references<'a>(&'a self, references: &mut HashSet<&'a Field>) {
@@ -91,7 +89,7 @@ impl PartialEq<dyn Any> for Select {
 #[cfg(test)]
 mod tests {
     use vortex_array::array::{PrimitiveArray, StructArray};
-    use vortex_array::IntoArray;
+    use vortex_array::IntoArrayData;
     use vortex_dtype::field::Field;
 
     use crate::{Select, VortexExpr};
@@ -109,7 +107,7 @@ mod tests {
         let st = test_array();
         let select = Select::include(vec![Field::from("a")]);
         let selected = select.evaluate(st.as_ref()).unwrap();
-        let selected_names = selected.with_dyn(|a| a.as_struct_array_unchecked().names().clone());
+        let selected_names = selected.as_struct_array().unwrap().names().clone();
         assert_eq!(selected_names.as_ref(), &["a".into()]);
     }
 
@@ -118,7 +116,7 @@ mod tests {
         let st = test_array();
         let select = Select::exclude(vec![Field::from("a")]);
         let selected = select.evaluate(st.as_ref()).unwrap();
-        let selected_names = selected.with_dyn(|a| a.as_struct_array_unchecked().names().clone());
+        let selected_names = selected.as_struct_array().unwrap().names().clone();
         assert_eq!(selected_names.as_ref(), &["b".into()]);
     }
 }

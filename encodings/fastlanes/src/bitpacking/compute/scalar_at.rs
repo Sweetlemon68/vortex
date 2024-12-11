@@ -1,36 +1,33 @@
-use vortex_array::compute::unary::{scalar_at_unchecked, ScalarAtFn};
+use vortex_array::compute::{scalar_at, ScalarAtFn};
+use vortex_array::validity::ArrayValidity;
 use vortex_array::ArrayDType;
-use vortex_error::{VortexResult, VortexUnwrap as _};
+use vortex_error::VortexResult;
 use vortex_scalar::Scalar;
 
-use crate::{unpack_single, BitPackedArray};
+use crate::{unpack_single, BitPackedArray, BitPackedEncoding};
 
-impl ScalarAtFn for BitPackedArray {
-    fn scalar_at(&self, index: usize) -> VortexResult<Scalar> {
-        if let Some(patches) = self.patches() {
+impl ScalarAtFn<BitPackedArray> for BitPackedEncoding {
+    fn scalar_at(&self, array: &BitPackedArray, index: usize) -> VortexResult<Scalar> {
+        if let Some(patches) = array.patches() {
             // NB: All non-null values are considered patches
-            if patches.with_dyn(|a| a.is_valid(index)) {
-                return scalar_at_unchecked(&patches, index).cast(self.dtype());
+            if patches.is_valid(index) {
+                return scalar_at(&patches, index)?.cast(array.dtype());
             }
         }
 
-        unpack_single(self, index)?.cast(self.dtype())
-    }
-
-    fn scalar_at_unchecked(&self, index: usize) -> Scalar {
-        self.scalar_at(index).vortex_unwrap()
+        unpack_single(array, index)?.cast(array.dtype())
     }
 }
 
 #[cfg(test)]
 mod test {
     use vortex_array::array::{PrimitiveArray, SparseArray};
-    use vortex_array::compute::unary::scalar_at;
+    use vortex_array::compute::scalar_at;
     use vortex_array::validity::Validity;
-    use vortex_array::IntoArray;
+    use vortex_array::IntoArrayData;
     use vortex_buffer::Buffer;
     use vortex_dtype::{DType, Nullability, PType};
-    use vortex_scalar::{Scalar, ScalarValue};
+    use vortex_scalar::Scalar;
 
     use crate::BitPackedArray;
 
@@ -45,7 +42,7 @@ mod test {
                     PrimitiveArray::from(vec![1u64]).into_array(),
                     PrimitiveArray::from_vec(vec![999u32], Validity::AllValid).into_array(),
                     8,
-                    ScalarValue::Null,
+                    Scalar::null_typed::<u32>(),
                 )
                 .unwrap()
                 .into_array(),

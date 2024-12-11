@@ -5,34 +5,23 @@ use vortex_array::aliases::hash_set::HashSet;
 use vortex_array::array::builder::VarBinBuilder;
 use vortex_array::array::{BoolArray, PrimitiveArray, StructArray, TemporalArray};
 use vortex_array::validity::Validity;
-use vortex_array::{Array, ArrayDType, IntoArray};
+use vortex_array::{ArrayDType, ArrayData, IntoArrayData};
 use vortex_dtype::{DType, FieldName, FieldNames, Nullability};
-use vortex_sampling_compressor::compressors::alp::ALPCompressor;
-use vortex_sampling_compressor::compressors::date_time_parts::DateTimePartsCompressor;
-use vortex_sampling_compressor::compressors::dict::DictCompressor;
-use vortex_sampling_compressor::compressors::r#for::FoRCompressor;
-use vortex_sampling_compressor::compressors::roaring_bool::RoaringBoolCompressor;
-use vortex_sampling_compressor::compressors::roaring_int::RoaringIntCompressor;
-use vortex_sampling_compressor::compressors::runend::DEFAULT_RUN_END_COMPRESSOR;
-use vortex_sampling_compressor::compressors::sparse::SparseCompressor;
-use vortex_sampling_compressor::compressors::zigzag::ZigZagCompressor;
-use vortex_sampling_compressor::compressors::CompressorRef;
 use vortex_sampling_compressor::{CompressConfig, SamplingCompressor};
 
 #[cfg(test)]
 mod tests {
-    use vortex_array::array::{Bool, ChunkedArray, VarBin};
-    use vortex_array::variants::{ArrayVariants, StructArrayTrait};
-    use vortex_array::ArrayDef;
+    use vortex_array::array::{BoolEncoding, BooleanBuffer, ChunkedArray, VarBinEncoding};
+    use vortex_array::encoding::Encoding;
+    use vortex_array::stats::{ArrayStatistics, Stat};
+    use vortex_array::variants::StructArrayTrait;
     use vortex_datetime_dtype::TimeUnit;
-    use vortex_datetime_parts::DateTimeParts;
-    use vortex_dict::Dict;
-    use vortex_fastlanes::FoR;
-    use vortex_fsst::FSST;
-    use vortex_sampling_compressor::compressors::alp_rd::ALPRDCompressor;
-    use vortex_sampling_compressor::compressors::bitpacked::BITPACK_WITH_PATCHES;
-    use vortex_sampling_compressor::compressors::delta::DeltaCompressor;
-    use vortex_sampling_compressor::compressors::fsst::FSSTCompressor;
+    use vortex_datetime_parts::DateTimePartsEncoding;
+    use vortex_dict::DictEncoding;
+    use vortex_fastlanes::FoREncoding;
+    use vortex_fsst::FSSTEncoding;
+    use vortex_sampling_compressor::ALL_COMPRESSORS;
+    use vortex_scalar::Scalar;
 
     use super::*;
 
@@ -40,25 +29,11 @@ mod tests {
     #[cfg_attr(miri, ignore)] // This test is too slow on miri
     pub fn smoketest_compressor() {
         let compressor = SamplingCompressor::new_with_options(
-            HashSet::from([
-                &ALPCompressor as CompressorRef,
-                &ALPRDCompressor,
-                &BITPACK_WITH_PATCHES,
-                &DateTimePartsCompressor,
-                &DeltaCompressor,
-                &DictCompressor,
-                &FoRCompressor,
-                &FSSTCompressor,
-                &RoaringBoolCompressor,
-                &RoaringIntCompressor,
-                &DEFAULT_RUN_END_COMPRESSOR,
-                &SparseCompressor,
-                &ZigZagCompressor,
-            ]),
+            HashSet::from_iter(ALL_COMPRESSORS),
             CompressConfig::default(),
         );
 
-        let def: &[(&str, Array)] = &[
+        let def: &[(&str, ArrayData)] = &[
             ("prim_col", make_primitive_column(65536)),
             ("bool_col", make_bool_column(65536)),
             ("varbin_col", make_string_column(65536)),
@@ -66,7 +41,7 @@ mod tests {
             ("timestamp_col", make_timestamp_column(65536)),
         ];
 
-        let fields: Vec<Array> = def.iter().map(|(_, arr)| arr.clone()).collect();
+        let fields: Vec<ArrayData> = def.iter().map(|(_, arr)| arr.clone()).collect();
         let field_names: FieldNames = FieldNames::from(
             def.iter()
                 .map(|(name, _)| FieldName::from(*name))
@@ -95,15 +70,16 @@ mod tests {
 
         let chunk_size = 1 << 14;
 
-        let ints: Vec<Array> = (0..4).map(|_| make_primitive_column(chunk_size)).collect();
-        let bools: Vec<Array> = (0..4).map(|_| make_bool_column(chunk_size)).collect();
-        let varbins: Vec<Array> = (0..4).map(|_| make_string_column(chunk_size)).collect();
-        let binaries: Vec<Array> = (0..4).map(|_| make_binary_column(chunk_size)).collect();
-        let timestamps: Vec<Array> = (0..4).map(|_| make_timestamp_column(chunk_size)).collect();
+        let ints: Vec<ArrayData> = (0..4).map(|_| make_primitive_column(chunk_size)).collect();
+        let bools: Vec<ArrayData> = (0..4).map(|_| make_bool_column(chunk_size)).collect();
+        let varbins: Vec<ArrayData> = (0..4).map(|_| make_string_column(chunk_size)).collect();
+        let binaries: Vec<ArrayData> = (0..4).map(|_| make_binary_column(chunk_size)).collect();
+        let timestamps: Vec<ArrayData> =
+            (0..4).map(|_| make_timestamp_column(chunk_size)).collect();
 
-        fn chunked(arrays: Vec<Array>) -> Array {
+        fn chunked(arrays: Vec<ArrayData>) -> ArrayData {
             let dtype = arrays[0].dtype().clone();
-            ChunkedArray::try_new(arrays, dtype).unwrap().into()
+            ChunkedArray::try_new(arrays, dtype).unwrap().into_array()
         }
 
         let to_compress = StructArray::try_new(
@@ -138,15 +114,19 @@ mod tests {
         assert_eq!(compressed.dtype(), to_compress.dtype());
 
         let struct_array: StructArray = compressed.try_into().unwrap();
-        let struct_array: &dyn StructArrayTrait = struct_array.as_struct_array().unwrap();
 
         let prim_col: ChunkedArray = struct_array
             .field_by_name("prim_col")
             .unwrap()
             .try_into()
             .unwrap();
+        println!("prim_col num chunks: {}", prim_col.nchunks());
         for chunk in prim_col.chunks() {
-            assert_eq!(chunk.encoding().id(), FoR::ID);
+            assert_eq!(chunk.encoding().id(), FoREncoding::ID);
+            assert_eq!(
+                chunk.statistics().get(Stat::UncompressedSizeInBytes),
+                Some(Scalar::from((chunk.len() * 8) as u64 + 1))
+            );
         }
 
         let bool_col: ChunkedArray = struct_array
@@ -155,7 +135,11 @@ mod tests {
             .try_into()
             .unwrap();
         for chunk in bool_col.chunks() {
-            assert_eq!(chunk.encoding().id(), Bool::ID);
+            assert_eq!(chunk.encoding().id(), BoolEncoding::ID);
+            assert_eq!(
+                chunk.statistics().get(Stat::UncompressedSizeInBytes),
+                Some(Scalar::from(chunk.len().div_ceil(8) as u64 + 2))
+            );
         }
 
         let varbin_col: ChunkedArray = struct_array
@@ -164,7 +148,14 @@ mod tests {
             .try_into()
             .unwrap();
         for chunk in varbin_col.chunks() {
-            assert!(chunk.encoding().id() == Dict::ID || chunk.encoding().id() == FSST::ID);
+            assert!(
+                chunk.encoding().id() == DictEncoding::ID
+                    || chunk.encoding().id() == FSSTEncoding::ID
+            );
+            assert_eq!(
+                chunk.statistics().get(Stat::UncompressedSizeInBytes),
+                Some(Scalar::from(1392677u64))
+            );
         }
 
         let binary_col: ChunkedArray = struct_array
@@ -173,7 +164,11 @@ mod tests {
             .try_into()
             .unwrap();
         for chunk in binary_col.chunks() {
-            assert_eq!(chunk.encoding().id(), VarBin::ID);
+            assert_eq!(chunk.encoding().id(), VarBinEncoding::ID);
+            assert_eq!(
+                chunk.statistics().get(Stat::UncompressedSizeInBytes),
+                Some(Scalar::from(134357018u64))
+            );
         }
 
         let timestamp_col: ChunkedArray = struct_array
@@ -182,11 +177,15 @@ mod tests {
             .try_into()
             .unwrap();
         for chunk in timestamp_col.chunks() {
-            assert_eq!(chunk.encoding().id(), DateTimeParts::ID);
+            assert_eq!(chunk.encoding().id(), DateTimePartsEncoding::ID);
+            assert_eq!(
+                chunk.statistics().get(Stat::UncompressedSizeInBytes),
+                Some((chunk.len() * 8 + 4).into())
+            )
         }
     }
 
-    fn make_primitive_column(count: usize) -> Array {
+    fn make_primitive_column(count: usize) -> ArrayData {
         PrimitiveArray::from_vec(
             (0..count).map(|i| i as i64).collect::<Vec<i64>>(),
             Validity::NonNullable,
@@ -194,12 +193,15 @@ mod tests {
         .into_array()
     }
 
-    fn make_bool_column(count: usize) -> Array {
-        let bools: Vec<bool> = (0..count).map(|_| rand::random::<bool>()).collect();
-        BoolArray::from_vec(bools, Validity::NonNullable).into_array()
+    fn make_bool_column(count: usize) -> ArrayData {
+        BoolArray::new(
+            BooleanBuffer::from_iter((0..count).map(|_| rand::random::<bool>())),
+            Nullability::NonNullable,
+        )
+        .into_array()
     }
 
-    fn make_string_column(count: usize) -> Array {
+    fn make_string_column(count: usize) -> ArrayData {
         let values = ["zzzz", "bbbbbb", "cccccc", "ddddd"];
         let mut builder = VarBinBuilder::<i64>::with_capacity(count);
         for i in 0..count {
@@ -211,7 +213,7 @@ mod tests {
             .into_array()
     }
 
-    fn make_binary_column(count: usize) -> Array {
+    fn make_binary_column(count: usize) -> ArrayData {
         let mut builder = VarBinBuilder::<i64>::with_capacity(count);
         let random: Vec<u8> = (0..count).map(|_| rand::random::<u8>()).collect();
         for i in 1..=count {
@@ -223,7 +225,7 @@ mod tests {
             .into_array()
     }
 
-    fn make_timestamp_column(count: usize) -> Array {
+    fn make_timestamp_column(count: usize) -> ArrayData {
         // Make new timestamps in incrementing order from EPOCH.
         let t0 = chrono::NaiveDateTime::default().and_utc();
 
@@ -234,7 +236,7 @@ mod tests {
         let storage_array =
             PrimitiveArray::from_vec(timestamps, Validity::NonNullable).into_array();
 
-        Array::from(TemporalArray::new_timestamp(
+        ArrayData::from(TemporalArray::new_timestamp(
             storage_array,
             TimeUnit::Ms,
             None,

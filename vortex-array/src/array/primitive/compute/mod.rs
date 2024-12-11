@@ -1,12 +1,11 @@
-use vortex_error::VortexResult;
-
-use crate::array::primitive::PrimitiveArray;
-use crate::compute::unary::{CastFn, FillForwardFn, ScalarAtFn, SubtractScalarFn};
-use crate::compute::{ArrayCompute, MaybeCompareFn, Operator, SearchSortedFn, SliceFn, TakeFn};
-use crate::Array;
+use crate::array::PrimitiveEncoding;
+use crate::compute::{
+    CastFn, ComputeVTable, FillForwardFn, FilterFn, ScalarAtFn, SearchSortedFn,
+    SearchSortedUsizeFn, SliceFn, SubtractScalarFn, TakeFn,
+};
+use crate::ArrayData;
 
 mod cast;
-mod compare;
 mod fill;
 mod filter;
 mod scalar_at;
@@ -15,36 +14,40 @@ mod slice;
 mod subtract_scalar;
 mod take;
 
-impl ArrayCompute for PrimitiveArray {
-    fn cast(&self) -> Option<&dyn CastFn> {
+impl ComputeVTable for PrimitiveEncoding {
+    fn cast_fn(&self) -> Option<&dyn CastFn<ArrayData>> {
         Some(self)
     }
 
-    fn compare(&self, other: &Array, operator: Operator) -> Option<VortexResult<Array>> {
-        MaybeCompareFn::maybe_compare(self, other, operator)
-    }
-
-    fn fill_forward(&self) -> Option<&dyn FillForwardFn> {
+    fn fill_forward_fn(&self) -> Option<&dyn FillForwardFn<ArrayData>> {
         Some(self)
     }
 
-    fn scalar_at(&self) -> Option<&dyn ScalarAtFn> {
+    fn filter_fn(&self) -> Option<&dyn FilterFn<ArrayData>> {
         Some(self)
     }
 
-    fn subtract_scalar(&self) -> Option<&dyn SubtractScalarFn> {
+    fn scalar_at_fn(&self) -> Option<&dyn ScalarAtFn<ArrayData>> {
         Some(self)
     }
 
-    fn search_sorted(&self) -> Option<&dyn SearchSortedFn> {
+    fn search_sorted_fn(&self) -> Option<&dyn SearchSortedFn<ArrayData>> {
         Some(self)
     }
 
-    fn slice(&self) -> Option<&dyn SliceFn> {
+    fn search_sorted_usize_fn(&self) -> Option<&dyn SearchSortedUsizeFn<ArrayData>> {
         Some(self)
     }
 
-    fn take(&self) -> Option<&dyn TakeFn> {
+    fn slice_fn(&self) -> Option<&dyn SliceFn<ArrayData>> {
+        Some(self)
+    }
+
+    fn subtract_scalar_fn(&self) -> Option<&dyn SubtractScalarFn<ArrayData>> {
+        Some(self)
+    }
+
+    fn take_fn(&self) -> Option<&dyn TakeFn<ArrayData>> {
         Some(self)
     }
 }

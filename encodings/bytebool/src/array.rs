@@ -1,17 +1,16 @@
 use std::fmt::{Debug, Display};
 use std::mem::ManuallyDrop;
+use std::sync::Arc;
 
 use arrow_buffer::BooleanBuffer;
 use serde::{Deserialize, Serialize};
-use vortex_array::array::visitor::{AcceptArrayVisitor, ArrayVisitor};
 use vortex_array::array::BoolArray;
 use vortex_array::encoding::ids;
 use vortex_array::stats::StatsSet;
-use vortex_array::validity::{ArrayValidity, LogicalValidity, Validity, ValidityMetadata};
-use vortex_array::variants::{ArrayVariants, BoolArrayTrait};
-use vortex_array::{
-    impl_encoding, Array, ArrayTrait, Canonical, IntoArray, IntoCanonical, TypedArray,
-};
+use vortex_array::validity::{LogicalValidity, Validity, ValidityMetadata, ValidityVTable};
+use vortex_array::variants::{BoolArrayTrait, VariantsVTable};
+use vortex_array::visitor::{ArrayVisitor, VisitorVTable};
+use vortex_array::{impl_encoding, ArrayData, ArrayLen, ArrayTrait, Canonical, IntoCanonical};
 use vortex_buffer::Buffer;
 use vortex_dtype::DType;
 use vortex_error::{VortexExpect as _, VortexResult};
@@ -41,18 +40,18 @@ impl ByteBoolArray {
     pub fn try_new(buffer: Buffer, validity: Validity) -> VortexResult<Self> {
         let length = buffer.len();
 
-        let typed = TypedArray::try_from_parts(
+        ArrayData::try_new_owned(
+            &ByteBoolEncoding,
             DType::Bool(validity.nullability()),
             length,
-            ByteBoolMetadata {
+            Arc::new(ByteBoolMetadata {
                 validity: validity.to_metadata(length)?,
-            },
+            }),
             Some(buffer),
             validity.into_array().into_iter().collect::<Vec<_>>().into(),
-            StatsSet::new(),
-        )?;
-
-        Ok(typed.into())
+            StatsSet::default(),
+        )?
+        .try_into()
     }
 
     pub fn try_from_vec<V: Into<Validity>>(data: Vec<bool>, validity: V) -> VortexResult<Self> {
@@ -85,29 +84,13 @@ impl ByteBoolArray {
 
 impl ArrayTrait for ByteBoolArray {}
 
-impl ArrayVariants for ByteBoolArray {
-    fn as_bool_array(&self) -> Option<&dyn BoolArrayTrait> {
-        Some(self)
+impl VariantsVTable<ByteBoolArray> for ByteBoolEncoding {
+    fn as_bool_array<'a>(&self, array: &'a ByteBoolArray) -> Option<&'a dyn BoolArrayTrait> {
+        Some(array)
     }
 }
 
-impl BoolArrayTrait for ByteBoolArray {
-    fn invert(&self) -> VortexResult<Array> {
-        ByteBoolArray::try_from_vec(
-            self.maybe_null_slice().iter().map(|v| !v).collect(),
-            self.validity(),
-        )
-        .map(|a| a.into_array())
-    }
-
-    fn maybe_null_indices_iter<'a>(&'a self) -> Box<dyn Iterator<Item = usize> + 'a> {
-        todo!()
-    }
-
-    fn maybe_null_slices_iter<'a>(&'a self) -> Box<dyn Iterator<Item = (usize, usize)> + 'a> {
-        todo!()
-    }
-}
+impl BoolArrayTrait for ByteBoolArray {}
 
 impl From<Vec<bool>> for ByteBoolArray {
     fn from(value: Vec<bool>) -> Self {
@@ -118,7 +101,7 @@ impl From<Vec<bool>> for ByteBoolArray {
 
 impl From<Vec<Option<bool>>> for ByteBoolArray {
     fn from(value: Vec<Option<bool>>) -> Self {
-        let validity = Validity::from_iter(value.iter());
+        let validity = Validity::from_iter(value.iter().map(|v| v.is_some()));
 
         // This doesn't reallocate, and the compiler even vectorizes it
         let data = value.into_iter().map(Option::unwrap_or_default).collect();
@@ -133,29 +116,34 @@ impl IntoCanonical for ByteBoolArray {
         let boolean_buffer = BooleanBuffer::from(self.maybe_null_slice());
         let validity = self.validity();
 
-        BoolArray::try_new(boolean_buffer, validity).map(Canonical::Bool)
+        Ok(Canonical::Bool(BoolArray::try_new(
+            boolean_buffer,
+            validity,
+        )?))
     }
 }
 
-impl ArrayValidity for ByteBoolArray {
-    fn is_valid(&self, index: usize) -> bool {
-        self.validity().is_valid(index)
+impl ValidityVTable<ByteBoolArray> for ByteBoolEncoding {
+    fn is_valid(&self, array: &ByteBoolArray, index: usize) -> bool {
+        array.validity().is_valid(index)
     }
 
-    fn logical_validity(&self) -> LogicalValidity {
-        self.validity().to_logical(self.len())
+    fn logical_validity(&self, array: &ByteBoolArray) -> LogicalValidity {
+        array.validity().to_logical(array.len())
     }
 }
 
-impl AcceptArrayVisitor for ByteBoolArray {
-    fn accept(&self, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
-        visitor.visit_buffer(self.buffer())?;
-        visitor.visit_validity(&self.validity())
+impl VisitorVTable<ByteBoolArray> for ByteBoolEncoding {
+    fn accept(&self, array: &ByteBoolArray, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
+        visitor.visit_buffer(array.buffer())?;
+        visitor.visit_validity(&array.validity())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use vortex_array::validity::ArrayValidity;
+
     use super::*;
 
     #[test]

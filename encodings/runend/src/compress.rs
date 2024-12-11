@@ -1,15 +1,13 @@
-use std::cmp::min;
-
+use arrow_buffer::BooleanBufferBuilder;
 use itertools::Itertools;
-use num_traits::{AsPrimitive, FromPrimitive};
-use vortex_array::array::PrimitiveArray;
-use vortex_array::compute::unary::scalar_at;
-use vortex_array::stats::{ArrayStatistics, Stat};
+use vortex_array::array::{BoolArray, BooleanBuffer, PrimitiveArray};
 use vortex_array::validity::Validity;
 use vortex_array::variants::PrimitiveArrayTrait;
 use vortex_array::ArrayDType;
 use vortex_dtype::{match_each_integer_ptype, match_each_native_ptype, NativePType, Nullability};
-use vortex_error::{vortex_panic, VortexResult, VortexUnwrap as _};
+use vortex_error::VortexResult;
+
+use crate::iter::trimmed_ends_iter;
 
 pub fn runend_encode(array: &PrimitiveArray) -> (PrimitiveArray, PrimitiveArray) {
     let validity = if array.dtype().nullability() == Nullability::NonNullable {
@@ -22,48 +20,6 @@ pub fn runend_encode(array: &PrimitiveArray) -> (PrimitiveArray, PrimitiveArray)
         let (ends, values) = runend_encode_primitive(array.maybe_null_slice::<$P>());
         (PrimitiveArray::from_vec(ends, Validity::NonNullable), PrimitiveArray::from_vec(values, validity))
     });
-
-    // the values array stats are trivially derived
-    compressed_values
-        .statistics()
-        .set(Stat::RunCount, compressed_values.len().into());
-    compressed_values
-        .statistics()
-        .set(Stat::IsConstant, (compressed_values.len() == 1).into());
-    if let Some(min) = array.statistics().get(Stat::Min) {
-        compressed_values.statistics().set(Stat::Min, min);
-    }
-    if let Some(max) = array.statistics().get(Stat::Max) {
-        compressed_values.statistics().set(Stat::Max, max);
-    }
-    if let Some(is_sorted) = array.statistics().get(Stat::IsSorted) {
-        compressed_values
-            .statistics()
-            .set(Stat::IsSorted, is_sorted);
-    }
-    if let Some(is_strict_sorted) = array.statistics().get(Stat::IsStrictSorted) {
-        compressed_values
-            .statistics()
-            .set(Stat::IsStrictSorted, is_strict_sorted);
-    }
-
-    compressed_ends
-        .statistics()
-        .set(Stat::IsConstant, (compressed_ends.len() == 1).into());
-    compressed_ends
-        .statistics()
-        .set(Stat::IsSorted, true.into());
-    compressed_ends
-        .statistics()
-        .set(Stat::IsStrictSorted, true.into());
-    if !compressed_ends.is_empty() {
-        compressed_ends
-            .statistics()
-            .set(Stat::Min, scalar_at(&compressed_ends, 0).vortex_unwrap());
-        compressed_ends
-            .statistics()
-            .set(Stat::Max, (array.len() as u64).into());
-    }
 
     assert_eq!(array.dtype(), compressed_values.dtype());
     (compressed_ends, compressed_values)
@@ -94,67 +50,71 @@ fn runend_encode_primitive<T: NativePType>(elements: &[T]) -> (Vec<u64>, Vec<T>)
     (ends, values)
 }
 
-pub fn runend_decode(
-    ends: &PrimitiveArray,
-    values: &PrimitiveArray,
+pub fn runend_decode_primitive(
+    ends: PrimitiveArray,
+    values: PrimitiveArray,
     validity: Validity,
     offset: usize,
     length: usize,
 ) -> VortexResult<PrimitiveArray> {
     match_each_native_ptype!(values.ptype(), |$P| {
         match_each_integer_ptype!(ends.ptype(), |$E| {
-            Ok(PrimitiveArray::from_vec(runend_decode_primitive(
-                ends.maybe_null_slice::<$E>(),
+            Ok(PrimitiveArray::from_vec(runend_decode_typed_primitive(
+                trimmed_ends_iter(ends.maybe_null_slice::<$E>(), offset, length),
                 values.maybe_null_slice::<$P>(),
-                offset,
                 length,
             ), validity))
         })
     })
 }
 
-pub fn runend_decode_primitive<
-    E: NativePType + AsPrimitive<usize> + FromPrimitive + Ord,
-    T: NativePType,
->(
-    run_ends: &[E],
-    values: &[T],
+pub fn runend_decode_bools(
+    ends: PrimitiveArray,
+    values: BoolArray,
+    validity: Validity,
     offset: usize,
     length: usize,
-) -> Vec<T> {
-    let offset_e = E::from_usize(offset).unwrap_or_else(|| {
-        vortex_panic!(
-            "offset {} cannot be converted to {}",
-            offset,
-            std::any::type_name::<E>()
-        )
-    });
-    let length_e = E::from_usize(length).unwrap_or_else(|| {
-        vortex_panic!(
-            "length {} cannot be converted to {}",
+) -> VortexResult<BoolArray> {
+    match_each_integer_ptype!(ends.ptype(), |$E| {
+        BoolArray::try_new(runend_decode_typed_bool(
+            trimmed_ends_iter(ends.maybe_null_slice::<$E>(), offset, length),
+            values.boolean_buffer(),
             length,
-            std::any::type_name::<E>()
-        )
-    });
-    let trimmed_ends = run_ends
-        .iter()
-        .map(|v| *v - offset_e)
-        .map(|v| min(v, length_e));
+        ), validity)
+    })
+}
 
+pub fn runend_decode_typed_primitive<T: NativePType>(
+    run_ends: impl Iterator<Item = usize>,
+    values: &[T],
+    length: usize,
+) -> Vec<T> {
     let mut decoded = Vec::with_capacity(length);
-    for (end, &value) in trimmed_ends.zip_eq(values) {
-        decoded.extend(std::iter::repeat(value).take(end.as_() - decoded.len()));
+    for (end, value) in run_ends.zip_eq(values) {
+        decoded.extend(std::iter::repeat_n(value, end - decoded.len()));
     }
     decoded
+}
+
+pub fn runend_decode_typed_bool(
+    run_ends: impl Iterator<Item = usize>,
+    values: BooleanBuffer,
+    length: usize,
+) -> BooleanBuffer {
+    let mut decoded = BooleanBufferBuilder::new(length);
+    for (end, value) in run_ends.zip_eq(values.iter()) {
+        decoded.append_n(end - decoded.len(), value);
+    }
+    decoded.finish()
 }
 
 #[cfg(test)]
 mod test {
     use vortex_array::array::PrimitiveArray;
     use vortex_array::validity::{ArrayValidity, Validity};
-    use vortex_array::IntoArray;
+    use vortex_array::{ArrayLen, IntoArrayData, IntoArrayVariant};
 
-    use crate::compress::{runend_decode, runend_encode};
+    use crate::compress::{runend_decode_primitive, runend_encode};
     use crate::RunEndArray;
 
     #[test]
@@ -170,7 +130,7 @@ mod test {
     fn decode() {
         let ends = PrimitiveArray::from(vec![2, 5, 10]);
         let values = PrimitiveArray::from(vec![1i32, 2, 3]);
-        let decoded = runend_decode(&ends, &values, Validity::NonNullable, 0, 10).unwrap();
+        let decoded = runend_decode_primitive(ends, values, Validity::NonNullable, 0, 10).unwrap();
 
         assert_eq!(
             decoded.maybe_null_slice::<i32>(),
@@ -184,7 +144,7 @@ mod test {
             let mut validity = vec![true; 10];
             validity[2] = false;
             validity[7] = false;
-            Validity::from(validity)
+            Validity::from_iter(validity)
         };
         let arr = RunEndArray::try_new(
             vec![2u32, 5, 10].into_array(),
@@ -193,9 +153,9 @@ mod test {
         )
         .unwrap();
 
-        let decoded = runend_decode(
-            &arr.ends().as_primitive(),
-            &arr.values().as_primitive(),
+        let decoded = runend_decode_primitive(
+            arr.ends().into_primitive().unwrap(),
+            arr.values().into_primitive().unwrap(),
             arr.validity(),
             0,
             arr.len(),
@@ -208,9 +168,7 @@ mod test {
         );
         assert_eq!(
             decoded.logical_validity().into_validity(),
-            Validity::from(vec![
-                true, true, false, true, true, true, true, false, true, true,
-            ])
+            Validity::from_iter([true, true, false, true, true, true, true, false, true, true,])
         );
     }
 }

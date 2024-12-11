@@ -1,13 +1,12 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use vortex_alp::{match_each_alp_float_ptype, ALPRDEncoding, RDEncoder as ALPRDEncoder, ALPRD};
+use vortex_alp::{match_each_alp_float_ptype, ALPRDEncoding, RDEncoder as ALPRDEncoder};
 use vortex_array::aliases::hash_set::HashSet;
 use vortex_array::array::PrimitiveArray;
-use vortex_array::encoding::EncodingRef;
-use vortex_array::stats::ArrayStatistics as _;
+use vortex_array::encoding::{Encoding, EncodingRef};
 use vortex_array::variants::PrimitiveArrayTrait;
-use vortex_array::{Array, ArrayDef, IntoArray, IntoArrayVariant};
+use vortex_array::{ArrayData, IntoArrayData, IntoArrayVariant};
 use vortex_dtype::PType;
 use vortex_error::{vortex_bail, VortexResult};
 use vortex_fastlanes::BitPackedEncoding;
@@ -26,16 +25,16 @@ impl EncoderMetadata for ALPRDEncoder {
 
 impl EncodingCompressor for ALPRDCompressor {
     fn id(&self) -> &str {
-        ALPRD::ID.as_ref()
+        ALPRDEncoding::ID.as_ref()
     }
 
     fn cost(&self) -> u8 {
         constants::ALP_RD_COST
     }
 
-    fn can_compress(&self, array: &Array) -> Option<&dyn EncodingCompressor> {
+    fn can_compress(&self, array: &ArrayData) -> Option<&dyn EncodingCompressor> {
         // Only support primitive arrays
-        let parray = PrimitiveArray::try_from(array).ok()?;
+        let parray = PrimitiveArray::maybe_from(array.clone())?;
 
         // Only supports f32 and f64
         if !matches!(parray.ptype(), PType::F32 | PType::F64) {
@@ -47,7 +46,7 @@ impl EncodingCompressor for ALPRDCompressor {
 
     fn compress<'a>(
         &'a self,
-        array: &Array,
+        array: &ArrayData,
         like: Option<CompressionTree<'a>>,
         _ctx: SamplingCompressor<'a>,
     ) -> VortexResult<CompressedArray<'a>> {
@@ -68,7 +67,7 @@ impl EncodingCompressor for ALPRDCompressor {
         Ok(CompressedArray::compressed(
             encoded,
             Some(CompressionTree::new_with_metadata(self, vec![], encoder)),
-            Some(array.statistics()),
+            array,
         ))
     }
 

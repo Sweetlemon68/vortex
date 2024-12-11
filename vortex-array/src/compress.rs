@@ -3,22 +3,24 @@ use vortex_error::VortexResult;
 use crate::aliases::hash_set::HashSet;
 use crate::encoding::EncodingRef;
 use crate::stats::{ArrayStatistics as _, PRUNING_STATS};
-use crate::Array;
+use crate::ArrayData;
 
 pub trait CompressionStrategy {
-    fn compress(&self, array: &Array) -> VortexResult<Array>;
+    fn compress(&self, array: &ArrayData) -> VortexResult<ArrayData>;
 
     fn used_encodings(&self) -> HashSet<EncodingRef>;
 }
 
 /// Check that compression did not alter the length of the validity array.
-pub fn check_validity_unchanged(arr: &Array, compressed: &Array) {
+pub fn check_validity_unchanged(arr: &ArrayData, compressed: &ArrayData) {
     let _ = arr;
     let _ = compressed;
     #[cfg(debug_assertions)]
     {
-        let old_validity = arr.with_dyn(|a| a.logical_validity().len());
-        let new_validity = compressed.with_dyn(|a| a.logical_validity().len());
+        use crate::validity::ArrayValidity;
+
+        let old_validity = arr.logical_validity().len();
+        let new_validity = compressed.logical_validity().len();
 
         debug_assert!(
             old_validity == new_validity,
@@ -30,7 +32,7 @@ pub fn check_validity_unchanged(arr: &Array, compressed: &Array) {
 }
 
 /// Check that compression did not alter the dtype
-pub fn check_dtype_unchanged(arr: &Array, compressed: &Array) {
+pub fn check_dtype_unchanged(arr: &ArrayData, compressed: &ArrayData) {
     let _ = arr;
     let _ = compressed;
     #[cfg(debug_assertions)]
@@ -48,12 +50,20 @@ pub fn check_dtype_unchanged(arr: &Array, compressed: &Array) {
 }
 
 // Check that compression preserved the statistics.
-pub fn check_statistics_unchanged(arr: &Array, compressed: &Array) {
+pub fn check_statistics_unchanged(arr: &ArrayData, compressed: &ArrayData) {
     let _ = arr;
     let _ = compressed;
     #[cfg(debug_assertions)]
     {
-        for (stat, value) in arr.statistics().to_set().into_iter() {
+        use crate::stats::Stat;
+
+        // Run count merge_ordered assumes that the run is "broken" on each chunk, which is a useful estimate but not guaranteed to be correct.
+        for (stat, value) in arr
+            .statistics()
+            .to_set()
+            .into_iter()
+            .filter(|(stat, _)| *stat != Stat::RunCount)
+        {
             debug_assert_eq!(
                 compressed.statistics().get(stat),
                 Some(value.clone()),
@@ -68,7 +78,9 @@ pub fn check_statistics_unchanged(arr: &Array, compressed: &Array) {
     }
 }
 
-/// Compute pruning stats for an array.
-pub fn compute_pruning_stats(arr: &Array) -> VortexResult<()> {
+/// Eagerly compute certain statistics (i.e., pruning stats plus UncompressedSizeInBytes) for an array.
+/// This function is intended to be called in compressors, immediately before compression occurs.
+pub fn compute_precompression_stats(arr: &ArrayData) -> VortexResult<()> {
+    arr.statistics().compute_uncompressed_size_in_bytes();
     arr.statistics().compute_all(PRUNING_STATS).map(|_| ())
 }

@@ -1,13 +1,13 @@
 #![cfg(test)]
 
 use vortex_array::array::builder::VarBinBuilder;
-use vortex_array::array::{BoolArray, PrimitiveArray};
-use vortex_array::compute::unary::scalar_at;
-use vortex_array::compute::{filter, slice, take};
+use vortex_array::array::PrimitiveArray;
+use vortex_array::compute::{filter, scalar_at, slice, take, FilterMask, TakeOptions};
+use vortex_array::encoding::Encoding;
 use vortex_array::validity::Validity;
-use vortex_array::{Array, ArrayDef, IntoArray, IntoCanonical};
+use vortex_array::{ArrayData, IntoArrayData, IntoCanonical};
 use vortex_dtype::{DType, Nullability};
-use vortex_fsst::{fsst_compress, fsst_train_compressor, FSST};
+use vortex_fsst::{fsst_compress, fsst_train_compressor, FSSTEncoding};
 
 macro_rules! assert_nth_scalar {
     ($arr:expr, $n:expr, $expected:expr) => {
@@ -16,7 +16,7 @@ macro_rules! assert_nth_scalar {
 }
 
 // this function is VERY slow on miri, so we only want to run it once
-fn build_fsst_array() -> Array {
+fn build_fsst_array() -> ArrayData {
     let mut input_array = VarBinBuilder::<i32>::with_capacity(3);
     input_array.push_value(b"The Greeks never said that the limit could not be overstepped");
     input_array.push_value(
@@ -56,7 +56,7 @@ fn test_fsst_array_ops() {
 
     // test slice
     let fsst_sliced = slice(&fsst_array, 1, 3).unwrap();
-    assert_eq!(fsst_sliced.encoding().id(), FSST::ENCODING.id());
+    assert_eq!(fsst_sliced.encoding().id(), FSSTEncoding::ID);
     assert_eq!(fsst_sliced.len(), 2);
     assert_nth_scalar!(
         fsst_sliced,
@@ -71,7 +71,7 @@ fn test_fsst_array_ops() {
 
     // test take
     let indices = PrimitiveArray::from_vec(vec![0, 2], Validity::NonNullable).into_array();
-    let fsst_taken = take(&fsst_array, &indices).unwrap();
+    let fsst_taken = take(&fsst_array, &indices, TakeOptions::default()).unwrap();
     assert_eq!(fsst_taken.len(), 2);
     assert_nth_scalar!(
         fsst_taken,
@@ -85,11 +85,10 @@ fn test_fsst_array_ops() {
     );
 
     // test filter
-    let predicate =
-        BoolArray::from_vec(vec![false, true, false], Validity::NonNullable).into_array();
+    let mask = FilterMask::from_iter([false, true, false]);
 
-    let fsst_filtered = filter(&fsst_array, &predicate).unwrap();
-    assert_eq!(fsst_filtered.encoding().id(), FSST::ENCODING.id());
+    let fsst_filtered = filter(&fsst_array, mask).unwrap();
+    assert_eq!(fsst_filtered.encoding().id(), FSSTEncoding::ID);
     assert_eq!(fsst_filtered.len(), 1);
     assert_nth_scalar!(
         fsst_filtered,

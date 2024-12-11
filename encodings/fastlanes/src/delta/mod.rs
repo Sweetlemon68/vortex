@@ -2,14 +2,15 @@ use std::fmt::{Debug, Display};
 
 pub use compress::*;
 use serde::{Deserialize, Serialize};
-use vortex_array::array::visitor::{AcceptArrayVisitor, ArrayVisitor};
 use vortex_array::array::PrimitiveArray;
 use vortex_array::encoding::ids;
-use vortex_array::stats::{ArrayStatisticsCompute, StatsSet};
-use vortex_array::validity::{ArrayValidity, LogicalValidity, Validity, ValidityMetadata};
-use vortex_array::variants::{ArrayVariants, PrimitiveArrayTrait};
+use vortex_array::stats::{StatisticsVTable, StatsSet};
+use vortex_array::validity::{LogicalValidity, Validity, ValidityMetadata, ValidityVTable};
+use vortex_array::variants::{PrimitiveArrayTrait, VariantsVTable};
+use vortex_array::visitor::{ArrayVisitor, VisitorVTable};
 use vortex_array::{
-    impl_encoding, Array, ArrayDType, ArrayTrait, Canonical, IntoArray, IntoCanonical,
+    impl_encoding, ArrayDType, ArrayData, ArrayLen, ArrayTrait, Canonical, IntoArrayData,
+    IntoCanonical,
 };
 use vortex_dtype::{match_each_unsigned_integer_ptype, NativePType};
 use vortex_error::{vortex_bail, vortex_panic, VortexExpect as _, VortexResult};
@@ -80,8 +81,8 @@ impl DeltaArray {
     }
 
     pub fn try_from_delta_compress_parts(
-        bases: Array,
-        deltas: Array,
+        bases: ArrayData,
+        deltas: ArrayData,
         validity: Validity,
     ) -> VortexResult<Self> {
         let logical_len = deltas.len();
@@ -89,8 +90,8 @@ impl DeltaArray {
     }
 
     pub fn try_new(
-        bases: Array,
-        deltas: Array,
+        bases: ArrayData,
+        deltas: ArrayData,
         validity: Validity,
         offset: usize,
         logical_len: usize,
@@ -117,6 +118,10 @@ impl DeltaArray {
         }
 
         let dtype = bases.dtype().clone();
+        if !dtype.is_int() {
+            vortex_bail!("DeltaArray: dtype must be an integer, got {}", dtype);
+        }
+
         let metadata = DeltaMetadata {
             validity: validity.to_metadata(logical_len)?,
             deltas_len: deltas.len() as u64,
@@ -133,7 +138,7 @@ impl DeltaArray {
             logical_len,
             metadata,
             children.into(),
-            StatsSet::new(),
+            StatsSet::default(),
         )?;
 
         if delta.bases().len() != delta.bases_len() {
@@ -159,14 +164,14 @@ impl DeltaArray {
     }
 
     #[inline]
-    pub fn bases(&self) -> Array {
+    pub fn bases(&self) -> ArrayData {
         self.as_ref()
             .child(0, self.dtype(), self.bases_len())
             .vortex_expect("DeltaArray is missing bases child array")
     }
 
     #[inline]
-    pub fn deltas(&self) -> Array {
+    pub fn deltas(&self) -> ArrayData {
         self.as_ref()
             .child(1, self.dtype(), self.deltas_len())
             .vortex_expect("DeltaArray is missing deltas child array")
@@ -213,9 +218,9 @@ impl DeltaArray {
 
 impl ArrayTrait for DeltaArray {}
 
-impl ArrayVariants for DeltaArray {
-    fn as_primitive_array(&self) -> Option<&dyn PrimitiveArrayTrait> {
-        Some(self)
+impl VariantsVTable<DeltaArray> for DeltaEncoding {
+    fn as_primitive_array<'a>(&self, array: &'a DeltaArray) -> Option<&'a dyn PrimitiveArrayTrait> {
+        Some(array)
     }
 }
 
@@ -227,21 +232,21 @@ impl IntoCanonical for DeltaArray {
     }
 }
 
-impl ArrayValidity for DeltaArray {
-    fn is_valid(&self, index: usize) -> bool {
-        self.validity().is_valid(index)
+impl ValidityVTable<DeltaArray> for DeltaEncoding {
+    fn is_valid(&self, array: &DeltaArray, index: usize) -> bool {
+        array.validity().is_valid(index)
     }
 
-    fn logical_validity(&self) -> LogicalValidity {
-        self.validity().to_logical(self.len())
-    }
-}
-
-impl AcceptArrayVisitor for DeltaArray {
-    fn accept(&self, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
-        visitor.visit_child("bases", &self.bases())?;
-        visitor.visit_child("deltas", &self.deltas())
+    fn logical_validity(&self, array: &DeltaArray) -> LogicalValidity {
+        array.validity().to_logical(array.len())
     }
 }
 
-impl ArrayStatisticsCompute for DeltaArray {}
+impl VisitorVTable<DeltaArray> for DeltaEncoding {
+    fn accept(&self, array: &DeltaArray, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
+        visitor.visit_child("bases", &array.bases())?;
+        visitor.visit_child("deltas", &array.deltas())
+    }
+}
+
+impl StatisticsVTable<DeltaArray> for DeltaEncoding {}

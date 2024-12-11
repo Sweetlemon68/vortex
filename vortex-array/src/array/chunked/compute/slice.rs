@@ -1,25 +1,26 @@
 use vortex_error::VortexResult;
 
 use crate::array::chunked::ChunkedArray;
+use crate::array::ChunkedEncoding;
 use crate::compute::{slice, SliceFn};
-use crate::{Array, ArrayDType, IntoArray};
+use crate::{ArrayDType, ArrayData, IntoArrayData};
 
-impl SliceFn for ChunkedArray {
-    fn slice(&self, start: usize, stop: usize) -> VortexResult<Array> {
-        let (offset_chunk, offset_in_first_chunk) = self.find_chunk_idx(start);
-        let (length_chunk, length_in_last_chunk) = self.find_chunk_idx(stop);
+impl SliceFn<ChunkedArray> for ChunkedEncoding {
+    fn slice(&self, array: &ChunkedArray, start: usize, stop: usize) -> VortexResult<ArrayData> {
+        let (offset_chunk, offset_in_first_chunk) = array.find_chunk_idx(start);
+        let (length_chunk, length_in_last_chunk) = array.find_chunk_idx(stop);
 
         if length_chunk == offset_chunk {
-            let chunk = self.chunk(offset_chunk)?;
-            return Ok(Self::try_new(
+            let chunk = array.chunk(offset_chunk)?;
+            return Ok(ChunkedArray::try_new(
                 vec![slice(&chunk, offset_in_first_chunk, length_in_last_chunk)?],
-                self.dtype().clone(),
+                array.dtype().clone(),
             )?
             .into_array());
         }
 
         let mut chunks = (offset_chunk..length_chunk + 1)
-            .map(|i| self.chunk(i))
+            .map(|i| array.chunk(i))
             .collect::<VortexResult<Vec<_>>>()?;
         if let Some(c) = chunks.first_mut() {
             *c = slice(&*c, offset_in_first_chunk, c.len())?;
@@ -31,7 +32,7 @@ impl SliceFn for ChunkedArray {
             *c = slice(&*c, 0, length_in_last_chunk)?;
         }
 
-        Self::try_new(chunks, self.dtype().clone()).map(|a| a.into_array())
+        ChunkedArray::try_new(chunks, array.dtype().clone()).map(|a| a.into_array())
     }
 }
 
@@ -41,7 +42,7 @@ mod tests {
 
     use crate::array::ChunkedArray;
     use crate::compute::slice;
-    use crate::{Array, IntoArray, IntoArrayVariant};
+    use crate::{ArrayData, IntoArrayData, IntoArrayVariant};
 
     fn chunked_array() -> ChunkedArray {
         ChunkedArray::try_new(
@@ -55,7 +56,7 @@ mod tests {
         .unwrap()
     }
 
-    fn assert_equal_slices<T: NativePType>(arr: Array, slice: &[T]) {
+    fn assert_equal_slices<T: NativePType>(arr: ArrayData, slice: &[T]) {
         let mut values = Vec::with_capacity(arr.len());
         ChunkedArray::try_from(arr)
             .unwrap()

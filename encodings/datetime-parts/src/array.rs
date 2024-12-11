@@ -1,15 +1,16 @@
 use std::fmt::{Debug, Display};
 
 use serde::{Deserialize, Serialize};
-use vortex_array::array::visitor::{AcceptArrayVisitor, ArrayVisitor};
 use vortex_array::array::StructArray;
-use vortex_array::compute::unary::try_cast;
+use vortex_array::compute::try_cast;
 use vortex_array::encoding::ids;
-use vortex_array::stats::{ArrayStatisticsCompute, StatsSet};
-use vortex_array::validity::{ArrayValidity, LogicalValidity, Validity};
-use vortex_array::variants::{ArrayVariants, ExtensionArrayTrait};
+use vortex_array::stats::StatsSet;
+use vortex_array::validity::{ArrayValidity, LogicalValidity, Validity, ValidityVTable};
+use vortex_array::variants::{ExtensionArrayTrait, VariantsVTable};
+use vortex_array::visitor::{ArrayVisitor, VisitorVTable};
 use vortex_array::{
-    impl_encoding, Array, ArrayDType, ArrayTrait, Canonical, IntoArray, IntoCanonical,
+    impl_encoding, ArrayDType, ArrayData, ArrayLen, ArrayTrait, Canonical, IntoArrayData,
+    IntoCanonical,
 };
 use vortex_dtype::{DType, PType};
 use vortex_error::{vortex_bail, VortexExpect as _, VortexResult, VortexUnwrap};
@@ -36,9 +37,9 @@ impl Display for DateTimePartsMetadata {
 impl DateTimePartsArray {
     pub fn try_new(
         dtype: DType,
-        days: Array,
-        seconds: Array,
-        subsecond: Array,
+        days: ArrayData,
+        seconds: ArrayData,
+        subsecond: ArrayData,
     ) -> VortexResult<Self> {
         if !days.dtype().is_int() || (dtype.is_nullable() != days.dtype().is_nullable()) {
             vortex_bail!(
@@ -75,11 +76,11 @@ impl DateTimePartsArray {
             length,
             metadata,
             [days, seconds, subsecond].into(),
-            StatsSet::new(),
+            StatsSet::default(),
         )
     }
 
-    pub fn days(&self) -> Array {
+    pub fn days(&self) -> ArrayData {
         self.as_ref()
             .child(
                 0,
@@ -89,13 +90,13 @@ impl DateTimePartsArray {
             .vortex_expect("DatetimePartsArray missing days array")
     }
 
-    pub fn seconds(&self) -> Array {
+    pub fn seconds(&self) -> ArrayData {
         self.as_ref()
             .child(1, &self.metadata().seconds_ptype.into(), self.len())
             .vortex_expect("DatetimePartsArray missing seconds array")
     }
 
-    pub fn subsecond(&self) -> Array {
+    pub fn subsecond(&self) -> ArrayData {
         self.as_ref()
             .child(2, &self.metadata().subseconds_ptype.into(), self.len())
             .vortex_expect("DatetimePartsArray missing subsecond array")
@@ -103,9 +104,7 @@ impl DateTimePartsArray {
 
     pub fn validity(&self) -> Validity {
         if self.dtype().is_nullable() {
-            self.days()
-                .with_dyn(|a| a.logical_validity())
-                .into_validity()
+            self.days().logical_validity().into_validity()
         } else {
             Validity::NonNullable
         }
@@ -114,14 +113,17 @@ impl DateTimePartsArray {
 
 impl ArrayTrait for DateTimePartsArray {}
 
-impl ArrayVariants for DateTimePartsArray {
-    fn as_extension_array(&self) -> Option<&dyn ExtensionArrayTrait> {
-        Some(self)
+impl VariantsVTable<DateTimePartsArray> for DateTimePartsEncoding {
+    fn as_extension_array<'a>(
+        &self,
+        array: &'a DateTimePartsArray,
+    ) -> Option<&'a dyn ExtensionArrayTrait> {
+        Some(array)
     }
 }
 
 impl ExtensionArrayTrait for DateTimePartsArray {
-    fn storage_array(&self) -> Array {
+    fn storage_data(&self) -> ArrayData {
         // FIXME(ngates): this needs to be a tuple array so we can implement Compare
         // we don't want to write validity twice, so we pull it up to the top
         let days = try_cast(self.days(), &self.days().dtype().as_nonnullable()).vortex_unwrap();
@@ -142,22 +144,24 @@ impl IntoCanonical for DateTimePartsArray {
     }
 }
 
-impl ArrayValidity for DateTimePartsArray {
-    fn is_valid(&self, index: usize) -> bool {
-        self.validity().is_valid(index)
+impl ValidityVTable<DateTimePartsArray> for DateTimePartsEncoding {
+    fn is_valid(&self, array: &DateTimePartsArray, index: usize) -> bool {
+        array.validity().is_valid(index)
     }
 
-    fn logical_validity(&self) -> LogicalValidity {
-        self.validity().to_logical(self.len())
-    }
-}
-
-impl AcceptArrayVisitor for DateTimePartsArray {
-    fn accept(&self, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
-        visitor.visit_child("days", &self.days())?;
-        visitor.visit_child("seconds", &self.seconds())?;
-        visitor.visit_child("subsecond", &self.subsecond())
+    fn logical_validity(&self, array: &DateTimePartsArray) -> LogicalValidity {
+        array.validity().to_logical(array.len())
     }
 }
 
-impl ArrayStatisticsCompute for DateTimePartsArray {}
+impl VisitorVTable<DateTimePartsArray> for DateTimePartsEncoding {
+    fn accept(
+        &self,
+        array: &DateTimePartsArray,
+        visitor: &mut dyn ArrayVisitor,
+    ) -> VortexResult<()> {
+        visitor.visit_child("days", &array.days())?;
+        visitor.visit_child("seconds", &array.seconds())?;
+        visitor.visit_child("subsecond", &array.subsecond())
+    }
+}

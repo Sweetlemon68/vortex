@@ -2,11 +2,10 @@ use arrayref::{array_mut_ref, array_ref};
 use fastlanes::{Delta, Transpose};
 use num_traits::{WrappingAdd, WrappingSub};
 use vortex_array::array::PrimitiveArray;
-use vortex_array::compute::unary::fill_forward;
-use vortex_array::compute::SliceFn;
+use vortex_array::compute::{fill_forward, slice};
 use vortex_array::validity::Validity;
 use vortex_array::variants::PrimitiveArrayTrait;
-use vortex_array::IntoArrayVariant;
+use vortex_array::{ArrayLen, IntoArrayVariant};
 use vortex_dtype::{match_each_unsigned_integer_ptype, NativePType, Nullability};
 use vortex_error::VortexResult;
 
@@ -108,9 +107,7 @@ pub fn delta_decompress(array: DeltaArray) -> VortexResult<PrimitiveArray> {
         )
     });
 
-    decoded
-        .slice(array.offset(), array.offset() + array.len())?
-        .into_primitive()
+    slice(decoded, array.offset(), array.offset() + array.len())?.into_primitive()
 }
 
 fn decompress_primitive<T: NativePType + Delta + Transpose + WrappingAdd>(
@@ -168,6 +165,8 @@ where
 
 #[cfg(test)]
 mod test {
+    use vortex_array::ArrayLen;
+
     use super::*;
 
     #[test]

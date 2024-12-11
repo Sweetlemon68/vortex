@@ -6,12 +6,12 @@ use serde::{Deserialize, Serialize};
 use vortex_dtype::{DType, ExtDType, ExtID};
 use vortex_error::{VortexExpect as _, VortexResult};
 
-use crate::array::visitor::{AcceptArrayVisitor, ArrayVisitor};
 use crate::encoding::ids;
-use crate::stats::{ArrayStatistics as _, ArrayStatisticsCompute, Stat, StatsSet};
-use crate::validity::{ArrayValidity, LogicalValidity};
-use crate::variants::{ArrayVariants, ExtensionArrayTrait};
-use crate::{impl_encoding, Array, ArrayDType, ArrayTrait, Canonical, IntoCanonical};
+use crate::stats::{ArrayStatistics as _, Stat, StatisticsVTable, StatsSet};
+use crate::validity::{ArrayValidity, LogicalValidity, ValidityVTable};
+use crate::variants::{ExtensionArrayTrait, VariantsVTable};
+use crate::visitor::{ArrayVisitor, VisitorVTable};
+use crate::{impl_encoding, ArrayDType, ArrayData, ArrayLen, ArrayTrait, Canonical, IntoCanonical};
 
 mod compute;
 
@@ -27,7 +27,7 @@ impl Display for ExtensionMetadata {
 }
 
 impl ExtensionArray {
-    pub fn new(ext_dtype: Arc<ExtDType>, storage: Array) -> Self {
+    pub fn new(ext_dtype: Arc<ExtDType>, storage: ArrayData) -> Self {
         assert_eq!(
             ext_dtype.storage_dtype(),
             storage.dtype(),
@@ -44,7 +44,7 @@ impl ExtensionArray {
         .vortex_expect("Invalid ExtensionArray")
     }
 
-    pub fn storage(&self) -> Array {
+    pub fn storage(&self) -> ArrayData {
         self.as_ref()
             .child(0, self.ext_dtype().storage_dtype(), self.len())
             .vortex_expect("Missing storage array for ExtensionArray")
@@ -59,14 +59,17 @@ impl ExtensionArray {
 
 impl ArrayTrait for ExtensionArray {}
 
-impl ArrayVariants for ExtensionArray {
-    fn as_extension_array(&self) -> Option<&dyn ExtensionArrayTrait> {
-        Some(self)
+impl VariantsVTable<ExtensionArray> for ExtensionEncoding {
+    fn as_extension_array<'a>(
+        &self,
+        array: &'a ExtensionArray,
+    ) -> Option<&'a dyn ExtensionArrayTrait> {
+        Some(array)
     }
 }
 
 impl ExtensionArrayTrait for ExtensionArray {
-    fn storage_array(&self) -> Array {
+    fn storage_data(&self) -> ArrayData {
         self.storage()
     }
 }
@@ -77,31 +80,31 @@ impl IntoCanonical for ExtensionArray {
     }
 }
 
-impl ArrayValidity for ExtensionArray {
-    fn is_valid(&self, index: usize) -> bool {
-        self.storage().with_dyn(|a| a.is_valid(index))
+impl ValidityVTable<ExtensionArray> for ExtensionEncoding {
+    fn is_valid(&self, array: &ExtensionArray, index: usize) -> bool {
+        array.storage().is_valid(index)
     }
 
-    fn logical_validity(&self) -> LogicalValidity {
-        self.storage().with_dyn(|a| a.logical_validity())
-    }
-}
-
-impl AcceptArrayVisitor for ExtensionArray {
-    fn accept(&self, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
-        visitor.visit_child("storage", &self.storage())
+    fn logical_validity(&self, array: &ExtensionArray) -> LogicalValidity {
+        array.storage().logical_validity()
     }
 }
 
-impl ArrayStatisticsCompute for ExtensionArray {
-    fn compute_statistics(&self, stat: Stat) -> VortexResult<StatsSet> {
-        let mut stats = self.storage().statistics().compute_all(&[stat])?;
+impl VisitorVTable<ExtensionArray> for ExtensionEncoding {
+    fn accept(&self, array: &ExtensionArray, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
+        visitor.visit_child("storage", &array.storage())
+    }
+}
+
+impl StatisticsVTable<ExtensionArray> for ExtensionEncoding {
+    fn compute_statistics(&self, array: &ExtensionArray, stat: Stat) -> VortexResult<StatsSet> {
+        let mut stats = array.storage().statistics().compute_all(&[stat])?;
 
         // for e.g., min/max, we want to cast to the extension array's dtype
         // for other stats, we don't need to change anything
         for stat in all::<Stat>().filter(|s| s.has_same_dtype_as_array()) {
             if let Some(value) = stats.get(stat) {
-                stats.set(stat, value.cast(self.dtype())?);
+                stats.set(stat, value.cast(array.dtype())?);
             }
         }
 
@@ -111,14 +114,13 @@ impl ArrayStatisticsCompute for ExtensionArray {
 
 #[cfg(test)]
 mod tests {
-    use itertools::Itertools;
     use vortex_dtype::PType;
-    use vortex_scalar::{PValue, Scalar, ScalarValue};
+    use vortex_scalar::Scalar;
 
     use super::*;
     use crate::array::PrimitiveArray;
     use crate::validity::Validity;
-    use crate::IntoArray as _;
+    use crate::IntoArrayData as _;
 
     #[test]
     fn compute_statistics() {
@@ -136,7 +138,7 @@ mod tests {
             .statistics()
             .compute_all(&[Stat::Min, Stat::Max, Stat::NullCount])
             .unwrap();
-        let num_stats = stats.clone().into_iter().try_len().unwrap();
+        let num_stats = stats.clone().into_iter().count();
         assert!(
             num_stats >= 3,
             "Expected at least 3 stats, got {}",
@@ -145,17 +147,11 @@ mod tests {
 
         assert_eq!(
             stats.get(Stat::Min),
-            Some(&Scalar::extension(
-                ext_dtype.clone(),
-                ScalarValue::Primitive(PValue::I64(1))
-            ))
+            Some(&Scalar::extension(ext_dtype.clone(), Scalar::from(1_i64)))
         );
         assert_eq!(
             stats.get(Stat::Max),
-            Some(&Scalar::extension(
-                ext_dtype.clone(),
-                ScalarValue::Primitive(PValue::I64(5))
-            ))
+            Some(&Scalar::extension(ext_dtype, Scalar::from(5_i64)))
         );
         assert_eq!(stats.get(Stat::NullCount), Some(&0u64.into()));
     }

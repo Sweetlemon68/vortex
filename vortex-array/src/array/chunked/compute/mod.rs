@@ -1,73 +1,73 @@
-use vortex_dtype::{DType, Nullability};
+use vortex_dtype::DType;
 use vortex_error::VortexResult;
 
 use crate::array::chunked::ChunkedArray;
-use crate::compute::unary::{try_cast, CastFn, ScalarAtFn, SubtractScalarFn};
+use crate::array::ChunkedEncoding;
 use crate::compute::{
-    compare, slice, ArrayCompute, CompareFn, FilterFn, Operator, SliceFn, TakeFn,
+    try_cast, BinaryBooleanFn, CastFn, CompareFn, ComputeVTable, FillNullFn, FilterFn, InvertFn,
+    ScalarAtFn, SliceFn, SubtractScalarFn, TakeFn,
 };
-use crate::{Array, IntoArray};
+use crate::{ArrayData, IntoArrayData};
 
+mod boolean;
+mod compare;
+mod fill_null;
 mod filter;
+mod invert;
 mod scalar_at;
 mod slice;
 mod take;
 
-impl ArrayCompute for ChunkedArray {
-    fn cast(&self) -> Option<&dyn CastFn> {
+impl ComputeVTable for ChunkedEncoding {
+    fn binary_boolean_fn(&self) -> Option<&dyn BinaryBooleanFn<ArrayData>> {
         Some(self)
     }
 
-    fn compare(&self, other: &Array, operator: Operator) -> Option<VortexResult<Array>> {
-        Some(CompareFn::compare(self, other, operator))
-    }
-
-    fn scalar_at(&self) -> Option<&dyn ScalarAtFn> {
+    fn cast_fn(&self) -> Option<&dyn CastFn<ArrayData>> {
         Some(self)
     }
 
-    fn subtract_scalar(&self) -> Option<&dyn SubtractScalarFn> {
+    fn compare_fn(&self) -> Option<&dyn CompareFn<ArrayData>> {
         Some(self)
     }
 
-    fn slice(&self) -> Option<&dyn SliceFn> {
+    fn filter_fn(&self) -> Option<&dyn FilterFn<ArrayData>> {
         Some(self)
     }
 
-    fn take(&self) -> Option<&dyn TakeFn> {
+    fn invert_fn(&self) -> Option<&dyn InvertFn<ArrayData>> {
         Some(self)
     }
 
-    fn filter(&self) -> Option<&dyn FilterFn> {
+    fn scalar_at_fn(&self) -> Option<&dyn ScalarAtFn<ArrayData>> {
+        Some(self)
+    }
+
+    fn slice_fn(&self) -> Option<&dyn SliceFn<ArrayData>> {
+        Some(self)
+    }
+
+    fn subtract_scalar_fn(&self) -> Option<&dyn SubtractScalarFn<ArrayData>> {
+        Some(self)
+    }
+
+    fn take_fn(&self) -> Option<&dyn TakeFn<ArrayData>> {
+        Some(self)
+    }
+
+    fn fill_null_fn(&self) -> Option<&dyn FillNullFn<ArrayData>> {
         Some(self)
     }
 }
 
-impl CastFn for ChunkedArray {
-    fn cast(&self, dtype: &DType) -> VortexResult<Array> {
+impl CastFn<ChunkedArray> for ChunkedEncoding {
+    fn cast(&self, array: &ChunkedArray, dtype: &DType) -> VortexResult<ArrayData> {
         let mut cast_chunks = Vec::new();
-        for chunk in self.chunks() {
+        for chunk in array.chunks() {
             cast_chunks.push(try_cast(&chunk, dtype)?);
         }
 
         Ok(ChunkedArray::try_new(cast_chunks, dtype.clone())?.into_array())
-    }
-}
-
-impl CompareFn for ChunkedArray {
-    fn compare(&self, array: &Array, operator: Operator) -> VortexResult<Array> {
-        let mut idx = 0;
-        let mut compare_chunks = Vec::with_capacity(self.nchunks());
-
-        for chunk in self.chunks() {
-            let sliced = slice(array, idx, idx + chunk.len())?;
-            let cmp_result = compare(&chunk, &sliced, operator)?;
-            compare_chunks.push(cmp_result);
-
-            idx += chunk.len();
-        }
-
-        Ok(ChunkedArray::try_new(compare_chunks, DType::Bool(Nullability::Nullable))?.into_array())
     }
 }
 
@@ -77,9 +77,9 @@ mod test {
 
     use crate::array::chunked::ChunkedArray;
     use crate::array::primitive::PrimitiveArray;
-    use crate::compute::unary::try_cast;
+    use crate::compute::try_cast;
     use crate::validity::Validity;
-    use crate::{IntoArray, IntoArrayVariant};
+    use crate::{IntoArrayData, IntoArrayVariant};
 
     #[test]
     fn test_cast_chunked() {

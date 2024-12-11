@@ -1,12 +1,14 @@
 use std::fmt::{Debug, Display};
 
 use serde::{Deserialize, Serialize};
-use vortex_array::array::visitor::{AcceptArrayVisitor, ArrayVisitor};
 use vortex_array::array::{PrimitiveArray, SparseArray};
 use vortex_array::encoding::ids;
-use vortex_array::stats::{ArrayStatisticsCompute, StatsSet};
-use vortex_array::validity::{ArrayValidity, LogicalValidity};
-use vortex_array::{impl_encoding, Array, ArrayDType, ArrayTrait, Canonical, IntoCanonical};
+use vortex_array::stats::{StatisticsVTable, StatsSet};
+use vortex_array::validity::{ArrayValidity, LogicalValidity, ValidityVTable};
+use vortex_array::visitor::{ArrayVisitor, VisitorVTable};
+use vortex_array::{
+    impl_encoding, ArrayDType, ArrayData, ArrayLen, ArrayTrait, Canonical, IntoCanonical,
+};
 use vortex_dtype::{DType, Nullability, PType};
 use vortex_error::{vortex_bail, VortexExpect, VortexResult};
 
@@ -32,11 +34,11 @@ impl Display for ALPRDMetadata {
 impl ALPRDArray {
     pub fn try_new(
         dtype: DType,
-        left_parts: Array,
+        left_parts: ArrayData,
         left_parts_dict: impl AsRef<[u16]>,
-        right_parts: Array,
+        right_parts: ArrayData,
         right_bit_width: u8,
-        left_parts_exceptions: Option<Array>,
+        left_parts_exceptions: Option<ArrayData>,
     ) -> VortexResult<Self> {
         if !dtype.is_float() {
             vortex_bail!("ALPRDArray given invalid DType ({dtype})");
@@ -100,7 +102,7 @@ impl ALPRDArray {
                 has_exceptions,
             },
             children.into(),
-            StatsSet::new(),
+            StatsSet::default(),
         )
     }
 
@@ -142,21 +144,21 @@ impl ALPRDArray {
     ///
     /// These are bit-packed and dictionary encoded, and cannot directly be interpreted without
     /// the metadata of this array.
-    pub fn left_parts(&self) -> Array {
+    pub fn left_parts(&self) -> ArrayData {
         self.as_ref()
             .child(0, &self.left_parts_dtype(), self.len())
             .vortex_expect("ALPRDArray: left_parts child")
     }
 
     /// The rightmost (least significant) bits of the floating point values stored in the array.
-    pub fn right_parts(&self) -> Array {
+    pub fn right_parts(&self) -> ArrayData {
         self.as_ref()
             .child(1, &self.right_parts_dtype(), self.len())
             .vortex_expect("ALPRDArray: right_parts child")
     }
 
     /// Patches of left-most bits.
-    pub fn left_parts_exceptions(&self) -> Option<Array> {
+    pub fn left_parts_exceptions(&self) -> Option<ArrayData> {
         self.metadata().has_exceptions.then(|| {
             self.as_ref()
                 .child(2, &self.left_parts_exceptions_dtype(), self.len())
@@ -234,22 +236,23 @@ impl IntoCanonical for ALPRDArray {
     }
 }
 
-impl ArrayValidity for ALPRDArray {
-    fn is_valid(&self, index: usize) -> bool {
+impl ValidityVTable<ALPRDArray> for ALPRDEncoding {
+    fn is_valid(&self, array: &ALPRDArray, index: usize) -> bool {
         // Use validity from left_parts
-        self.left_parts().with_dyn(|a| a.is_valid(index))
+        array.left_parts().is_valid(index)
     }
 
-    fn logical_validity(&self) -> LogicalValidity {
-        self.left_parts().with_dyn(|a| a.logical_validity())
+    fn logical_validity(&self, array: &ALPRDArray) -> LogicalValidity {
+        // Use validity from left_parts
+        array.left_parts().logical_validity()
     }
 }
 
-impl AcceptArrayVisitor for ALPRDArray {
-    fn accept(&self, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
-        visitor.visit_child("left_parts", &self.left_parts())?;
-        visitor.visit_child("right_parts", &self.right_parts())?;
-        if let Some(left_parts_exceptions) = self.left_parts_exceptions() {
+impl VisitorVTable<ALPRDArray> for ALPRDEncoding {
+    fn accept(&self, array: &ALPRDArray, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
+        visitor.visit_child("left_parts", &array.left_parts())?;
+        visitor.visit_child("right_parts", &array.right_parts())?;
+        if let Some(left_parts_exceptions) = array.left_parts_exceptions() {
             visitor.visit_child("left_parts_exceptions", &left_parts_exceptions)
         } else {
             Ok(())
@@ -257,7 +260,7 @@ impl AcceptArrayVisitor for ALPRDArray {
     }
 }
 
-impl ArrayStatisticsCompute for ALPRDArray {}
+impl StatisticsVTable<ALPRDArray> for ALPRDEncoding {}
 
 impl ArrayTrait for ALPRDArray {}
 
@@ -265,7 +268,7 @@ impl ArrayTrait for ALPRDArray {}
 mod test {
     use rstest::rstest;
     use vortex_array::array::PrimitiveArray;
-    use vortex_array::{IntoArray, IntoCanonical};
+    use vortex_array::{IntoArrayData, IntoCanonical};
 
     use crate::{alp_rd, ALPRDFloat};
 

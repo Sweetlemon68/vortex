@@ -1,15 +1,15 @@
 use vortex_array::aliases::hash_set::HashSet;
 use vortex_array::array::TemporalArray;
-use vortex_array::encoding::EncodingRef;
-use vortex_array::stats::ArrayStatistics as _;
-use vortex_array::{Array, ArrayDType, ArrayDef, IntoArray};
+use vortex_array::encoding::{Encoding, EncodingRef};
+use vortex_array::{ArrayDType, ArrayData, IntoArrayData};
 use vortex_datetime_dtype::TemporalMetadata;
 use vortex_datetime_parts::{
-    split_temporal, DateTimeParts, DateTimePartsArray, DateTimePartsEncoding, TemporalParts,
+    split_temporal, DateTimePartsArray, DateTimePartsEncoding, TemporalParts,
 };
 use vortex_error::VortexResult;
 
 use crate::compressors::{CompressedArray, CompressionTree, EncodingCompressor};
+use crate::downscale::downscale_integer_array;
 use crate::{constants, SamplingCompressor};
 
 #[derive(Debug)]
@@ -17,15 +17,15 @@ pub struct DateTimePartsCompressor;
 
 impl EncodingCompressor for DateTimePartsCompressor {
     fn id(&self) -> &str {
-        DateTimeParts::ID.as_ref()
+        DateTimePartsEncoding::ID.as_ref()
     }
 
     fn cost(&self) -> u8 {
         constants::DATE_TIME_PARTS_COST
     }
 
-    fn can_compress(&self, array: &Array) -> Option<&dyn EncodingCompressor> {
-        if let Ok(temporal_array) = TemporalArray::try_from(array) {
+    fn can_compress(&self, array: &ArrayData) -> Option<&dyn EncodingCompressor> {
+        if let Ok(temporal_array) = TemporalArray::try_from(array.clone()) {
             match temporal_array.temporal_metadata() {
                 // We only attempt to compress Timestamp arrays.
                 TemporalMetadata::Timestamp(..) => Some(self),
@@ -38,7 +38,7 @@ impl EncodingCompressor for DateTimePartsCompressor {
 
     fn compress<'a>(
         &'a self,
-        array: &Array,
+        array: &ArrayData,
         like: Option<CompressionTree<'a>>,
         ctx: SamplingCompressor<'a>,
     ) -> VortexResult<CompressedArray<'a>> {
@@ -46,17 +46,20 @@ impl EncodingCompressor for DateTimePartsCompressor {
             days,
             seconds,
             subseconds,
-        } = split_temporal(TemporalArray::try_from(array)?)?;
+        } = split_temporal(TemporalArray::try_from(array.clone())?)?;
 
-        let days = ctx
-            .named("days")
-            .compress(&days, like.as_ref().and_then(|l| l.child(0)))?;
-        let seconds = ctx
-            .named("seconds")
-            .compress(&seconds, like.as_ref().and_then(|l| l.child(1)))?;
-        let subsecond = ctx
-            .named("subsecond")
-            .compress(&subseconds, like.as_ref().and_then(|l| l.child(2)))?;
+        let days = ctx.named("days").compress(
+            &downscale_integer_array(days)?,
+            like.as_ref().and_then(|l| l.child(0)),
+        )?;
+        let seconds = ctx.named("seconds").compress(
+            &downscale_integer_array(seconds)?,
+            like.as_ref().and_then(|l| l.child(1)),
+        )?;
+        let subsecond = ctx.named("subsecond").compress(
+            &downscale_integer_array(subseconds)?,
+            like.as_ref().and_then(|l| l.child(2)),
+        )?;
         Ok(CompressedArray::compressed(
             DateTimePartsArray::try_new(
                 array.dtype().clone(),
@@ -69,7 +72,7 @@ impl EncodingCompressor for DateTimePartsCompressor {
                 self,
                 vec![days.path, seconds.path, subsecond.path],
             )),
-            Some(array.statistics()),
+            array,
         ))
     }
 

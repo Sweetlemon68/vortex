@@ -6,7 +6,7 @@ use rand::distributions::Uniform;
 use rand::{thread_rng, Rng};
 use vortex_array::array::BoolArray;
 use vortex_array::compute::Operator;
-use vortex_array::IntoArray;
+use vortex_array::IntoArrayData;
 use vortex_error::VortexError;
 
 fn compare_bool(c: &mut Criterion) {
@@ -14,18 +14,8 @@ fn compare_bool(c: &mut Criterion) {
 
     let mut rng = thread_rng();
     let range = Uniform::new(0u8, 1);
-    let arr = BoolArray::from(
-        (0..10_000_000)
-            .map(|_| rng.sample(range) == 0)
-            .collect_vec(),
-    )
-    .into_array();
-    let arr2 = BoolArray::from(
-        (0..10_000_000)
-            .map(|_| rng.sample(range) == 0)
-            .collect_vec(),
-    )
-    .into_array();
+    let arr = BoolArray::from_iter((0..10_000_000).map(|_| rng.sample(range) == 0)).into_array();
+    let arr2 = BoolArray::from_iter((0..10_000_000).map(|_| rng.sample(range) == 0)).into_array();
 
     group.bench_function("compare_bool", |b| {
         b.iter(|| {

@@ -1,16 +1,16 @@
 use arrow_buffer::ArrowNativeType;
 use fastlanes::BitPacking;
-use vortex_array::array::{PrimitiveArray, Sparse, SparseArray};
+use vortex_array::array::{PrimitiveArray, SparseArray};
 use vortex_array::stats::ArrayStatistics;
 use vortex_array::validity::{ArrayValidity, Validity};
 use vortex_array::variants::PrimitiveArrayTrait;
-use vortex_array::{Array, ArrayDType, ArrayDef, IntoArray, IntoArrayVariant};
+use vortex_array::{ArrayDType, ArrayData, ArrayLen, IntoArrayData, IntoArrayVariant};
 use vortex_buffer::Buffer;
 use vortex_dtype::{
     match_each_integer_ptype, match_each_unsigned_integer_ptype, NativePType, PType,
 };
 use vortex_error::{vortex_bail, vortex_err, VortexResult, VortexUnwrap};
-use vortex_scalar::{Scalar, ScalarValue};
+use vortex_scalar::Scalar;
 
 use crate::BitPackedArray;
 
@@ -141,7 +141,7 @@ pub fn gather_patches(
     parray: &PrimitiveArray,
     bit_width: u8,
     num_exceptions_hint: usize,
-) -> Option<Array> {
+) -> Option<ArrayData> {
     match_each_integer_ptype!(parray.ptype(), |$T| {
         let mut indices: Vec<u64> = Vec::with_capacity(num_exceptions_hint);
         let mut values: Vec<$T> = Vec::with_capacity(num_exceptions_hint);
@@ -157,7 +157,7 @@ pub fn gather_patches(
                 indices.into_array(),
                 PrimitiveArray::from_vec(values, Validity::AllValid).into_array(),
                 parray.len(),
-                ScalarValue::Null,
+                Scalar::null(parray.dtype().as_nullable()),
             )
             .vortex_unwrap()
             .into_array()
@@ -189,24 +189,16 @@ pub fn unpack(array: BitPackedArray) -> VortexResult<PrimitiveArray> {
     }
 }
 
-fn patch_unpacked(array: PrimitiveArray, patches: &Array) -> VortexResult<PrimitiveArray> {
-    match patches.encoding().id() {
-        Sparse::ID => {
-            match_each_integer_ptype!(array.ptype(), |$T| {
-                let typed_patches = SparseArray::try_from(patches).unwrap();
-                let primitive_values = typed_patches.values().into_primitive()?;
-                array.patch(
-                    &typed_patches.resolved_indices(),
-                    primitive_values.maybe_null_slice::<$T>(),
-                    primitive_values.validity())
-            })
-        }
-        _ => vortex_bail!(
-            "Can't patch bitpacked array with {}, only {} is supported",
-            patches,
-            Sparse::ID
-        ),
-    }
+fn patch_unpacked(array: PrimitiveArray, patches: &ArrayData) -> VortexResult<PrimitiveArray> {
+    let typed_patches = SparseArray::try_from(patches.clone())?;
+
+    match_each_integer_ptype!(array.ptype(), |$T| {
+        let primitive_values = typed_patches.values().into_primitive()?;
+        array.patch(
+            &typed_patches.resolved_indices(),
+            primitive_values.maybe_null_slice::<$T>(),
+            primitive_values.validity())
+    })
 }
 
 pub fn unpack_primitive<T: NativePType + BitPacking>(
@@ -340,6 +332,7 @@ pub fn find_best_bit_width(array: &PrimitiveArray) -> VortexResult<u8> {
 
 /// Assuming exceptions cost 1 value + 1 u32 index, figure out the best bit-width to use.
 /// We could try to be clever, but we can never really predict how the exceptions will compress.
+#[allow(clippy::cast_possible_truncation)]
 fn best_bit_width(bit_width_freq: &[usize], bytes_per_exception: usize) -> VortexResult<u8> {
     if bit_width_freq.len() > u8::MAX as usize {
         vortex_bail!("Too many bit widths");
@@ -377,8 +370,9 @@ pub fn count_exceptions(bit_width: u8, bit_width_freq: &[usize]) -> usize {
 }
 
 #[cfg(test)]
+#[allow(clippy::cast_possible_truncation)]
 mod test {
-    use vortex_array::{IntoArrayVariant, ToArray};
+    use vortex_array::{IntoArrayVariant, ToArrayData};
 
     use super::*;
 
@@ -397,8 +391,10 @@ mod test {
     #[test]
     fn null_patches() {
         let valid_values = (0..24).map(|v| v < 1 << 4).collect::<Vec<_>>();
-        let values =
-            PrimitiveArray::from_vec((0u32..24).collect::<Vec<_>>(), Validity::from(valid_values));
+        let values = PrimitiveArray::from_vec(
+            (0u32..24).collect::<Vec<_>>(),
+            Validity::from_iter(valid_values),
+        );
         assert!(values.ptype().is_unsigned_int());
         let compressed = BitPackedArray::encode(values.as_ref(), 4).unwrap();
         assert!(compressed.patches().is_none());

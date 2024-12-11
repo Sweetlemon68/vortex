@@ -1,41 +1,41 @@
 use itertools::Itertools;
 use vortex_array::aliases::hash_set::HashSet;
-use vortex_array::array::{Struct, StructArray};
-use vortex_array::compress::compute_pruning_stats;
-use vortex_array::encoding::EncodingRef;
-use vortex_array::stats::ArrayStatistics as _;
+use vortex_array::array::{StructArray, StructEncoding};
+use vortex_array::compress::compute_precompression_stats;
+use vortex_array::encoding::{Encoding, EncodingRef};
 use vortex_array::variants::StructArrayTrait;
-use vortex_array::{Array, ArrayDef, IntoArray};
+use vortex_array::{ArrayDType, ArrayData, ArrayLen, IntoArrayData};
+use vortex_dtype::DType;
 use vortex_error::VortexResult;
 
 use crate::compressors::{CompressedArray, CompressionTree, EncodingCompressor};
-use crate::SamplingCompressor;
+use crate::{constants, SamplingCompressor};
 
 #[derive(Debug)]
 pub struct StructCompressor;
 
 impl EncodingCompressor for StructCompressor {
     fn id(&self) -> &str {
-        Struct::ID.as_ref()
+        StructEncoding::ID.as_ref()
     }
 
     fn cost(&self) -> u8 {
-        0
+        constants::STRUCT_COST
     }
 
-    fn can_compress(&self, array: &Array) -> Option<&dyn EncodingCompressor> {
-        StructArray::try_from(array)
-            .ok()
-            .map(|_| self as &dyn EncodingCompressor)
+    fn can_compress(&self, array: &ArrayData) -> Option<&dyn EncodingCompressor> {
+        let is_struct =
+            matches!(array.dtype(), DType::Struct(..)) && array.is_encoding(StructEncoding::ID);
+        is_struct.then_some(self)
     }
 
     fn compress<'a>(
         &'a self,
-        array: &Array,
+        array: &ArrayData,
         like: Option<CompressionTree<'a>>,
         ctx: SamplingCompressor<'a>,
     ) -> VortexResult<CompressedArray<'a>> {
-        let array = StructArray::try_from(array)?;
+        let array = StructArray::try_from(array.clone())?;
         let compressed_validity = ctx.compress_validity(array.validity())?;
 
         let children_trees = match like {
@@ -51,7 +51,7 @@ impl EncodingCompressor for StructCompressor {
                 // to compute post-compression. That's because not all encodings implement stats, so we would
                 // potentially have to canonicalize during writes just to get stats, which would be silly.
                 // Also, we only really require them for column chunks, not for every array.
-                compute_pruning_stats(&array)?;
+                compute_precompression_stats(&array)?;
                 ctx.compress(&array, like.as_ref())
             })
             .process_results(|iter| iter.map(|x| (x.array, x.path)).unzip())?;
@@ -65,11 +65,11 @@ impl EncodingCompressor for StructCompressor {
             )?
             .into_array(),
             Some(CompressionTree::new(self, trees)),
-            Some(array.statistics()),
+            array,
         ))
     }
 
     fn used_encodings(&self) -> HashSet<EncodingRef> {
-        HashSet::from([])
+        HashSet::from([&StructEncoding as EncodingRef])
     }
 }

@@ -7,23 +7,24 @@ use vortex_dtype::match_each_integer_ptype;
 use vortex_error::{vortex_bail, VortexResult};
 use vortex_scalar::Scalar;
 
-use crate::compute::unary::subtract_scalar;
-use crate::compute::{search_sorted, slice, take, SearchSortedSide};
+use crate::compute::{
+    search_sorted_usize, slice, subtract_scalar, take, SearchSortedSide, TakeOptions,
+};
 use crate::stats::{ArrayStatistics, Stat};
 use crate::stream::ArrayStream;
 use crate::variants::PrimitiveArrayTrait;
-use crate::{Array, ArrayDType, IntoArray, IntoArrayVariant};
+use crate::{ArrayDType, ArrayData, IntoArrayData, IntoArrayVariant};
 
 #[pin_project]
 pub struct TakeRows<R: ArrayStream> {
     #[pin]
     reader: R,
-    indices: Array,
+    indices: ArrayData,
     row_offset: usize,
 }
 
 impl<R: ArrayStream> TakeRows<R> {
-    pub fn try_new(reader: R, indices: Array) -> VortexResult<Self> {
+    pub fn try_new(reader: R, indices: ArrayData) -> VortexResult<Self> {
         if !indices.is_empty() {
             if !indices.statistics().compute_is_sorted().unwrap_or(false) {
                 vortex_bail!("Indices must be sorted to take from IPC stream")
@@ -62,7 +63,7 @@ impl<R: ArrayStream> TakeRows<R> {
 }
 
 impl<R: ArrayStream> Stream for TakeRows<R> {
-    type Item = VortexResult<Array>;
+    type Item = VortexResult<ArrayData>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
@@ -73,8 +74,9 @@ impl<R: ArrayStream> Stream for TakeRows<R> {
 
         while let Some(batch) = ready!(this.reader.as_mut().poll_next(cx)?) {
             let curr_offset = *this.row_offset;
-            let left = search_sorted(this.indices, curr_offset, SearchSortedSide::Left)?.to_index();
-            let right = search_sorted(
+            let left =
+                search_sorted_usize(this.indices, curr_offset, SearchSortedSide::Left)?.to_index();
+            let right = search_sorted_usize(
                 this.indices,
                 curr_offset + batch.len(),
                 SearchSortedSide::Left,
@@ -93,7 +95,11 @@ impl<R: ArrayStream> Stream for TakeRows<R> {
             let shifted_arr = match_each_integer_ptype!(indices_for_batch.ptype(), |$T| {
                 subtract_scalar(&indices_for_batch.into_array(), &Scalar::from(curr_offset as $T))?
             });
-            return Poll::Ready(take(&batch, &shifted_arr).map(Some).transpose());
+            return Poll::Ready(
+                take(&batch, &shifted_arr, TakeOptions::default())
+                    .map(Some)
+                    .transpose(),
+            );
         }
 
         Poll::Ready(None)

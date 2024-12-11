@@ -1,22 +1,22 @@
-use vortex_array::compute::{filter, FilterFn};
-use vortex_array::{Array, ArrayDType, IntoArray};
+use vortex_array::compute::{filter, FilterFn, FilterMask};
+use vortex_array::{ArrayDType, ArrayData, IntoArrayData};
 use vortex_error::VortexResult;
 
-use crate::ALPRDArray;
+use crate::{ALPRDArray, ALPRDEncoding};
 
-impl FilterFn for ALPRDArray {
-    fn filter(&self, predicate: &Array) -> VortexResult<Array> {
-        let left_parts_exceptions = self
+impl FilterFn<ALPRDArray> for ALPRDEncoding {
+    fn filter(&self, array: &ALPRDArray, mask: FilterMask) -> VortexResult<ArrayData> {
+        let left_parts_exceptions = array
             .left_parts_exceptions()
-            .map(|array| filter(&array, predicate))
+            .map(|array| filter(&array, mask.clone()))
             .transpose()?;
 
         Ok(ALPRDArray::try_new(
-            self.dtype().clone(),
-            filter(self.left_parts(), predicate)?,
-            self.left_parts_dict(),
-            filter(self.right_parts(), predicate)?,
-            self.right_bit_width(),
+            array.dtype().clone(),
+            filter(&array.left_parts(), mask.clone())?,
+            array.left_parts_dict(),
+            filter(&array.right_parts(), mask)?,
+            array.right_bit_width(),
             left_parts_exceptions,
         )?
         .into_array())
@@ -26,8 +26,8 @@ impl FilterFn for ALPRDArray {
 #[cfg(test)]
 mod test {
     use rstest::rstest;
-    use vortex_array::array::{BoolArray, PrimitiveArray};
-    use vortex_array::compute::filter;
+    use vortex_array::array::PrimitiveArray;
+    use vortex_array::compute::{filter, FilterMask};
     use vortex_array::IntoArrayVariant;
 
     use crate::{ALPRDFloat, RDEncoder};
@@ -43,7 +43,7 @@ mod test {
         assert!(encoded.left_parts_exceptions().is_some());
 
         // The first two values need no patching
-        let filtered = filter(encoded.as_ref(), BoolArray::from(vec![true, false, true]))
+        let filtered = filter(encoded.as_ref(), FilterMask::from_iter([true, false, true]))
             .unwrap()
             .into_primitive()
             .unwrap();

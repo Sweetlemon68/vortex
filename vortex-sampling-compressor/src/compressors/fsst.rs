@@ -4,16 +4,19 @@ use std::sync::Arc;
 
 use fsst::Compressor;
 use vortex_array::aliases::hash_set::HashSet;
-use vortex_array::array::{VarBin, VarBinArray, VarBinView};
-use vortex_array::encoding::EncodingRef;
-use vortex_array::stats::ArrayStatistics as _;
-use vortex_array::{ArrayDType, ArrayDef, IntoArray};
+use vortex_array::array::{VarBinEncoding, VarBinViewEncoding};
+use vortex_array::encoding::{Encoding, EncodingRef};
+use vortex_array::{ArrayDType, IntoArrayData};
 use vortex_dtype::DType;
 use vortex_error::{vortex_bail, VortexResult};
-use vortex_fsst::{fsst_compress, fsst_train_compressor, FSSTArray, FSSTEncoding, FSST};
+use vortex_fsst::{fsst_compress, fsst_train_compressor, FSSTArray, FSSTEncoding};
 
+use super::bitpacked::BITPACK_WITH_PATCHES;
 use super::delta::DeltaCompressor;
+use super::r#for::FoRCompressor;
+use super::varbin::VarBinCompressor;
 use super::{CompressedArray, CompressionTree, EncoderMetadata, EncodingCompressor};
+use crate::downscale::downscale_integer_array;
 use crate::{constants, SamplingCompressor};
 
 #[derive(Debug)]
@@ -30,14 +33,14 @@ impl EncoderMetadata for Compressor {
 
 impl EncodingCompressor for FSSTCompressor {
     fn id(&self) -> &str {
-        FSST::ID.as_ref()
+        FSSTEncoding::ID.as_ref()
     }
 
     fn cost(&self) -> u8 {
         constants::FSST_COST
     }
 
-    fn can_compress(&self, array: &vortex_array::Array) -> Option<&dyn EncodingCompressor> {
+    fn can_compress(&self, array: &vortex_array::ArrayData) -> Option<&dyn EncodingCompressor> {
         // FSST arrays must have DType::Utf8.
         //
         // Note that while it can accept binary data, it is unlikely to perform well.
@@ -46,7 +49,7 @@ impl EncodingCompressor for FSSTCompressor {
         }
 
         // FSST can be applied on top of VarBin and VarBinView
-        if array.is_encoding(VarBin::ID) || array.is_encoding(VarBinView::ID) {
+        if array.is_encoding(VarBinEncoding::ID) || array.is_encoding(VarBinViewEncoding::ID) {
             return Some(self);
         }
 
@@ -55,7 +58,7 @@ impl EncodingCompressor for FSSTCompressor {
 
     fn compress<'a>(
         &'a self,
-        array: &vortex_array::Array,
+        array: &vortex_array::ArrayData,
         // TODO(aduffy): reuse compressor from sample run if we have saved it off.
         like: Option<CompressionTree<'a>>,
         ctx: SamplingCompressor<'a>,
@@ -78,60 +81,53 @@ impl EncodingCompressor for FSSTCompressor {
             vortex_bail!("Could not downcast metadata as FSST Compressor")
         };
 
-        let fsst_array = if array.is_encoding(VarBin::ID) || array.is_encoding(VarBinView::ID) {
-            // For a VarBinArray or VarBinViewArray, compress directly.
-            fsst_compress(array, fsst_compressor)?
-        } else {
-            vortex_bail!(
-                "Unsupported encoding for FSSTCompressor: {}",
-                array.encoding().id()
-            )
-        };
+        let fsst_array =
+            if array.is_encoding(VarBinEncoding::ID) || array.is_encoding(VarBinViewEncoding::ID) {
+                // For a VarBinArray or VarBinViewArray, compress directly.
+                fsst_compress(array, fsst_compressor)?
+            } else {
+                vortex_bail!(
+                    "Unsupported encoding for FSSTCompressor: {}",
+                    array.encoding().id()
+                )
+            };
+
+        let codes = fsst_array.codes();
+        let compressed_codes = ctx
+            .auxiliary("fsst_codes")
+            .excluding(self)
+            .including_only(&[
+                &VarBinCompressor,
+                &DeltaCompressor,
+                &FoRCompressor,
+                &BITPACK_WITH_PATCHES,
+            ])
+            .compress(&codes, like.as_ref().and_then(|l| l.child(2)))?;
 
         // Compress the uncompressed_lengths array.
         let uncompressed_lengths = ctx
             .auxiliary("uncompressed_lengths")
             .excluding(self)
             .compress(
-                &fsst_array.uncompressed_lengths(),
-                like.as_ref().and_then(|l| l.child(0)),
+                &downscale_integer_array(fsst_array.uncompressed_lengths())?,
+                like.as_ref().and_then(|l| l.child(3)),
             )?;
-
-        let codes_varbin = VarBinArray::try_from(fsst_array.codes())?;
-        let codes_varbin_dtype = codes_varbin.dtype().clone();
-
-        let codes_offsets_compressed = ctx
-            .named("fsst_codes_offsets")
-            .excluding(self)
-            .including(&DeltaCompressor)
-            .compress(
-                &codes_varbin.offsets(),
-                like.as_ref().and_then(|l| l.child(1)),
-            )?;
-
-        let codes = VarBinArray::try_new(
-            codes_offsets_compressed.array,
-            codes_varbin.bytes(),
-            codes_varbin_dtype,
-            codes_varbin.validity(),
-        )?
-        .into_array();
 
         Ok(CompressedArray::compressed(
             FSSTArray::try_new(
                 fsst_array.dtype().clone(),
                 fsst_array.symbols(),
                 fsst_array.symbol_lengths(),
-                codes,
+                compressed_codes.array,
                 uncompressed_lengths.array,
             )?
             .into_array(),
             Some(CompressionTree::new_with_metadata(
                 self,
-                vec![uncompressed_lengths.path, codes_offsets_compressed.path],
+                vec![None, None, compressed_codes.path, uncompressed_lengths.path],
                 compressor,
             )),
-            Some(array.statistics()),
+            array,
         ))
     }
 

@@ -8,6 +8,7 @@ mod chunked;
 mod constant;
 mod datetime;
 mod extension;
+mod list;
 mod null;
 mod primitive;
 mod sparse;
@@ -16,7 +17,6 @@ mod varbin;
 mod varbinview;
 
 pub mod from;
-pub mod visitor;
 
 #[cfg(feature = "arbitrary")]
 pub mod arbitrary;
@@ -26,6 +26,7 @@ pub use self::chunked::*;
 pub use self::constant::*;
 pub use self::datetime::*;
 pub use self::extension::*;
+pub use self::list::*;
 pub use self::null::*;
 pub use self::primitive::*;
 pub use self::sparse::*;

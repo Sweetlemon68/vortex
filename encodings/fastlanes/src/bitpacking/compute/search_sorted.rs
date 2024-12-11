@@ -7,71 +7,83 @@ use itertools::Itertools;
 use num_traits::AsPrimitive;
 use vortex_array::array::SparseArray;
 use vortex_array::compute::{
-    search_sorted_u64, IndexOrd, Len, SearchResult, SearchSorted, SearchSortedFn, SearchSortedSide,
+    search_sorted_usize, IndexOrd, Len, SearchResult, SearchSorted, SearchSortedFn,
+    SearchSortedSide, SearchSortedUsizeFn,
 };
+use vortex_array::stats::ArrayStatistics;
 use vortex_array::validity::Validity;
 use vortex_array::variants::PrimitiveArrayTrait;
-use vortex_array::ArrayDType;
+use vortex_array::{ArrayDType, ArrayLen};
 use vortex_dtype::{match_each_unsigned_integer_ptype, NativePType};
 use vortex_error::{VortexError, VortexExpect as _, VortexResult};
 use vortex_scalar::Scalar;
 
-use crate::{unpack_single_primitive, BitPackedArray};
+use crate::{unpack_single_primitive, BitPackedArray, BitPackedEncoding};
 
-impl SearchSortedFn for BitPackedArray {
-    fn search_sorted(&self, value: &Scalar, side: SearchSortedSide) -> VortexResult<SearchResult> {
-        match_each_unsigned_integer_ptype!(self.ptype(), |$P| {
-            search_sorted_typed::<$P>(self, value, side)
-        })
-    }
-
-    fn search_sorted_u64(&self, value: u64, side: SearchSortedSide) -> VortexResult<SearchResult> {
-        match_each_unsigned_integer_ptype!(self.ptype(), |$P| {
-            // NOTE: conversion may truncate silently.
-            if let Some(pvalue) = num_traits::cast::<u64, $P>(value) {
-                search_sorted_native(self, pvalue, side)
-            } else {
-                // provided u64 is too large to fit in the provided PType, value must be off
-                // the right end of the array.
-                Ok(SearchResult::NotFound(self.len()))
-            }
+impl SearchSortedFn<BitPackedArray> for BitPackedEncoding {
+    fn search_sorted(
+        &self,
+        array: &BitPackedArray,
+        value: &Scalar,
+        side: SearchSortedSide,
+    ) -> VortexResult<SearchResult> {
+        match_each_unsigned_integer_ptype!(array.ptype(), |$P| {
+            search_sorted_typed::<$P>(array, value, side)
         })
     }
 
     fn search_sorted_many(
         &self,
+        array: &BitPackedArray,
         values: &[Scalar],
-        sides: &[SearchSortedSide],
+        side: SearchSortedSide,
     ) -> VortexResult<Vec<SearchResult>> {
-        match_each_unsigned_integer_ptype!(self.ptype(), |$P| {
-            let searcher = BitPackedSearch::<'_, $P>::new(self);
+        match_each_unsigned_integer_ptype!(array.ptype(), |$P| {
+            let searcher = BitPackedSearch::<'_, $P>::new(array);
 
             values
                 .iter()
-                .zip(sides.iter().copied())
-                .map(|(value, side)| {
+                .map(|value| {
                     // Unwrap to native value
-                    let unwrapped_value: $P = value.cast(self.dtype())?.try_into()?;
-
+                    let unwrapped_value: $P = value.cast(array.dtype())?.try_into()?;
                     Ok(searcher.search_sorted(&unwrapped_value, side))
                 })
                 .try_collect()
         })
     }
+}
 
-    fn search_sorted_u64_many(
+impl SearchSortedUsizeFn<BitPackedArray> for BitPackedEncoding {
+    fn search_sorted_usize(
         &self,
-        values: &[u64],
-        sides: &[SearchSortedSide],
+        array: &BitPackedArray,
+        value: usize,
+        side: SearchSortedSide,
+    ) -> VortexResult<SearchResult> {
+        match_each_unsigned_integer_ptype!(array.ptype(), |$P| {
+            // NOTE: conversion may truncate silently.
+            if let Some(pvalue) = num_traits::cast::<usize, $P>(value) {
+                search_sorted_native(array, pvalue, side)
+            } else {
+                // provided u64 is too large to fit in the provided PType, value must be off
+                // the right end of the array.
+                Ok(SearchResult::NotFound(array.len()))
+            }
+        })
+    }
+
+    fn search_sorted_usize_many(
+        &self,
+        array: &BitPackedArray,
+        values: &[usize],
+        side: SearchSortedSide,
     ) -> VortexResult<Vec<SearchResult>> {
-        match_each_unsigned_integer_ptype!(self.ptype(), |$P| {
-            let searcher = BitPackedSearch::<'_, $P>::new(self);
+        match_each_unsigned_integer_ptype!(array.ptype(), |$P| {
+            let searcher = BitPackedSearch::<'_, $P>::new(array);
 
             values
                 .iter()
-                .copied()
-                .zip(sides.iter().copied())
-                .map(|(value, side)| {
+                .map(|&value| {
                     // NOTE: truncating cast
                     let cast_value: $P = value as $P;
                     Ok(searcher.search_sorted(&cast_value, side))
@@ -111,7 +123,9 @@ where
         // max packed value just search the patches
         let usize_value: usize = value.as_();
         if usize_value > array.max_packed_value() {
-            search_sorted_u64(&patches_array, value.as_(), side)
+            // FIXME(ngates): this is broken. Patches _aren't_ sorted because they're sparse and
+            //  interspersed with nulls...
+            search_sorted_usize(&patches_array, usize_value, side)
         } else {
             Ok(BitPackedSearch::<'_, T>::new(array).search_sorted(&value, side))
         }
@@ -137,7 +151,7 @@ impl<'a, T: BitPacking + NativePType> BitPackedSearch<'a, T> {
         let min_patch_offset = array
             .patches()
             .and_then(|p| {
-                SparseArray::try_from(p)
+                SparseArray::maybe_from(p)
                     .vortex_expect("Only sparse patches are supported")
                     .min_index()
             })
@@ -147,7 +161,10 @@ impl<'a, T: BitPacking + NativePType> BitPackedSearch<'a, T> {
             Validity::AllInvalid => 0,
             Validity::Array(varray) => {
                 // In sorted order, nulls come after all the non-null values.
-                varray.with_dyn(|a| a.as_bool_array_unchecked().true_count())
+                varray
+                    .statistics()
+                    .compute_true_count()
+                    .vortex_expect("Failed to compute true count")
             }
         };
 
@@ -177,7 +194,7 @@ impl<T: BitPacking + NativePType> IndexOrd<T> for BitPackedSearch<'_, T> {
                 idx + self.offset as usize,
             )
         };
-        Some(val.compare(*elem))
+        Some(val.total_compare(*elem))
     }
 }
 
@@ -191,9 +208,9 @@ impl<T> Len for BitPackedSearch<'_, T> {
 mod test {
     use vortex_array::array::PrimitiveArray;
     use vortex_array::compute::{
-        search_sorted, search_sorted_many, slice, SearchResult, SearchSortedFn, SearchSortedSide,
+        search_sorted, search_sorted_many, slice, SearchResult, SearchSortedSide,
     };
-    use vortex_array::IntoArray;
+    use vortex_array::IntoArrayData;
     use vortex_dtype::Nullability;
     use vortex_scalar::Scalar;
 
@@ -252,12 +269,12 @@ mod test {
         )
         .unwrap();
 
-        let found = bitpacked
-            .search_sorted(
-                &Scalar::primitive(1u64, Nullability::Nullable),
-                SearchSortedSide::Left,
-            )
-            .unwrap();
+        let found = search_sorted(
+            bitpacked.as_ref(),
+            Scalar::primitive(1u64, Nullability::Nullable),
+            SearchSortedSide::Left,
+        )
+        .unwrap();
         assert_eq!(found, SearchResult::Found(0));
     }
 
@@ -282,11 +299,7 @@ mod test {
         let results = search_sorted_many(
             bitpacked.as_ref(),
             &[3u64, 2u64, 1u64],
-            &[
-                SearchSortedSide::Left,
-                SearchSortedSide::Left,
-                SearchSortedSide::Left,
-            ],
+            SearchSortedSide::Left,
         )
         .unwrap();
 

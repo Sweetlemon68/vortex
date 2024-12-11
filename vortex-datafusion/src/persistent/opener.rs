@@ -1,18 +1,20 @@
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use datafusion::datasource::physical_plan::{FileMeta, FileOpenFuture, FileOpener};
 use datafusion_common::Result as DFResult;
-use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_expr::{split_conjunction, PhysicalExpr};
 use futures::{FutureExt as _, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use vortex_array::Context;
 use vortex_expr::datafusion::convert_expr_to_vortex;
-use vortex_serde::file::{
-    LayoutContext, LayoutDeserializer, Projection, RowFilter, VortexReadBuilder,
-};
-use vortex_serde::io::ObjectStoreReadAt;
+use vortex_file::{LayoutContext, LayoutDeserializer, Projection, RowFilter, VortexReadBuilder};
+use vortex_io::{IoDispatcher, ObjectStoreReadAt};
+
+/// Share an IO dispatcher across all DataFusion instances.
+static IO_DISPATCHER: LazyLock<Arc<IoDispatcher>> =
+    LazyLock::new(|| Arc::new(IoDispatcher::default()));
 
 pub struct VortexFileOpener {
     pub ctx: Arc<Context>,
@@ -30,14 +32,21 @@ impl FileOpener for VortexFileOpener {
         let mut builder = VortexReadBuilder::new(
             read_at,
             LayoutDeserializer::new(self.ctx.clone(), Arc::new(LayoutContext::default())),
-        );
+        )
+        .with_io_dispatcher(IO_DISPATCHER.clone());
 
+        // We split the predicate and filter out the conjunction members that we can't push down
         let row_filter = self
             .predicate
-            .clone()
-            .map(convert_expr_to_vortex)
-            .transpose()?
-            .map(RowFilter::new);
+            .as_ref()
+            .map(|filter_expr| {
+                split_conjunction(filter_expr)
+                    .into_iter()
+                    .filter_map(|e| convert_expr_to_vortex(e.clone()).ok())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|conjunction| !conjunction.is_empty())
+            .map(RowFilter::from_conjunction);
 
         if let Some(row_filter) = row_filter {
             builder = builder.with_row_filter(row_filter);

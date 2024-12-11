@@ -4,9 +4,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyInt, PyList};
 use vortex::array::ChunkedArray;
-use vortex::compute::unary::{fill_forward, scalar_at};
-use vortex::compute::{compare, slice, take, Operator};
-use vortex::{Array, ArrayDType, IntoCanonical};
+use vortex::compute::{
+    compare, fill_forward, scalar_at, slice, take, FilterMask, Operator, TakeOptions,
+};
+use vortex::{ArrayDType, ArrayData, IntoCanonical};
 
 use crate::dtype::PyDType;
 use crate::python_repr::PythonRepr;
@@ -77,15 +78,15 @@ use crate::scalar::scalar_into_py;
 ///   true
 /// ]
 pub struct PyArray {
-    inner: Array,
+    inner: ArrayData,
 }
 
 impl PyArray {
-    pub fn new(inner: Array) -> PyArray {
+    pub fn new(inner: ArrayData) -> PyArray {
         PyArray { inner }
     }
 
-    pub fn unwrap(&self) -> &Array {
+    pub fn unwrap(&self) -> &ArrayData {
         &self.inner
     }
 }
@@ -118,13 +119,10 @@ impl PyArray {
         let py = self_.py();
         let vortex = &self_.inner;
 
-        if let Ok(chunked_array) = ChunkedArray::try_from(vortex) {
+        if let Ok(chunked_array) = ChunkedArray::try_from(vortex.clone()) {
             let chunks: Vec<ArrayRef> = chunked_array
                 .chunks()
-                .map(|chunk| -> PyResult<ArrayRef> {
-                    let canonical = chunk.into_canonical()?;
-                    Ok(canonical.into_arrow()?)
-                })
+                .map(|chunk| -> PyResult<ArrayRef> { Ok(chunk.into_arrow()?) })
                 .collect::<PyResult<Vec<ArrayRef>>>()?;
             if chunks.is_empty() {
                 return Err(PyValueError::new_err("No chunks in array"));
@@ -144,8 +142,7 @@ impl PyArray {
         } else {
             Ok(vortex
                 .clone()
-                .into_canonical()
-                .and_then(|arr| arr.into_arrow())?
+                .into_arrow()?
                 .into_data()
                 .to_pyarrow(py)?
                 .into_bound(py))
@@ -267,7 +264,8 @@ impl PyArray {
     /// ]
     fn filter(&self, filter: &Bound<PyArray>) -> PyResult<PyArray> {
         let filter = filter.borrow();
-        let inner = vortex::compute::filter(&self.inner, &filter.inner)?;
+        let inner =
+            vortex::compute::filter(&self.inner, FilterMask::try_from(filter.inner.clone())?)?;
         Ok(PyArray { inner })
     }
 
@@ -441,7 +439,7 @@ impl PyArray {
             )));
         }
 
-        let inner = take(&self.inner, indices)?;
+        let inner = take(&self.inner, indices, TakeOptions::default())?;
         Ok(PyArray { inner })
     }
 
@@ -518,10 +516,10 @@ impl PyArray {
     ///
     ///     >>> arr = vortex.array([1, 2, None, 3])
     ///     >>> print(arr.tree_display())
-    ///     root: vortex.primitive(0x03)(i64?, len=4) nbytes=33 B (100.00%)
+    ///     root: vortex.primitive(0x03)(i64?, len=4) nbytes=36 B (100.00%)
     ///       metadata: PrimitiveMetadata { validity: Array }
     ///       buffer: 32 B
-    ///       validity: vortex.bool(0x02)(bool, len=4) nbytes=1 B (3.03%)
+    ///       validity: vortex.bool(0x02)(bool, len=4) nbytes=3 B (8.33%)
     ///         metadata: BoolMetadata { validity: NonNullable, first_byte_bit_offset: 0 }
     ///         buffer: 1 B
     ///     <BLANKLINE>

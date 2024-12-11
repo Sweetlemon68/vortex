@@ -5,12 +5,15 @@ use vortex_dtype::field::Field;
 use vortex_dtype::{DType, FieldName, FieldNames, StructDType};
 use vortex_error::{vortex_bail, vortex_err, vortex_panic, VortexExpect as _, VortexResult};
 
-use crate::array::visitor::{AcceptArrayVisitor, ArrayVisitor};
 use crate::encoding::ids;
-use crate::stats::{ArrayStatisticsCompute, StatsSet};
-use crate::validity::{ArrayValidity, LogicalValidity, Validity, ValidityMetadata};
-use crate::variants::{ArrayVariants, StructArrayTrait};
-use crate::{impl_encoding, Array, ArrayDType, ArrayTrait, Canonical, IntoArray, IntoCanonical};
+use crate::stats::{ArrayStatistics, Stat, StatisticsVTable, StatsSet};
+use crate::validity::{LogicalValidity, Validity, ValidityMetadata, ValidityVTable};
+use crate::variants::{StructArrayTrait, VariantsVTable};
+use crate::visitor::{ArrayVisitor, VisitorVTable};
+use crate::{
+    impl_encoding, ArrayDType, ArrayData, ArrayLen, ArrayTrait, Canonical, IntoArrayData,
+    IntoCanonical,
+};
 
 mod compute;
 
@@ -36,7 +39,7 @@ impl StructArray {
         })
     }
 
-    pub fn children(&self) -> impl Iterator<Item = Array> + '_ {
+    pub fn children(&self) -> impl Iterator<Item = ArrayData> + '_ {
         (0..self.nfields()).map(move |idx| {
             self.field(idx).unwrap_or_else(|| {
                 vortex_panic!("Field {} not found, nfields: {}", idx, self.nfields())
@@ -46,7 +49,7 @@ impl StructArray {
 
     pub fn try_new(
         names: FieldNames,
-        fields: Vec<Array>,
+        fields: Vec<ArrayData>,
         length: usize,
         validity: Validity,
     ) -> VortexResult<Self> {
@@ -82,16 +85,16 @@ impl StructArray {
                 validity: validity_metadata,
             },
             children.into(),
-            StatsSet::new(),
+            StatsSet::default(),
         )
     }
 
-    pub fn from_fields<N: AsRef<str>>(items: &[(N, Array)]) -> VortexResult<Self> {
+    pub fn from_fields<N: AsRef<str>>(items: &[(N, ArrayData)]) -> VortexResult<Self> {
         let names: Vec<FieldName> = items
             .iter()
             .map(|(name, _)| FieldName::from(name.as_ref()))
             .collect();
-        let fields: Vec<Array> = items.iter().map(|(_, array)| array.clone()).collect();
+        let fields: Vec<ArrayData> = items.iter().map(|(_, array)| array.clone()).collect();
         let len = fields
             .first()
             .map(|f| f.len())
@@ -140,14 +143,14 @@ impl StructArray {
 
 impl ArrayTrait for StructArray {}
 
-impl ArrayVariants for StructArray {
-    fn as_struct_array(&self) -> Option<&dyn StructArrayTrait> {
-        Some(self)
+impl VariantsVTable<StructArray> for StructEncoding {
+    fn as_struct_array<'a>(&self, array: &'a StructArray) -> Option<&'a dyn StructArrayTrait> {
+        Some(array)
     }
 }
 
 impl StructArrayTrait for StructArray {
-    fn field(&self, idx: usize) -> Option<Array> {
+    fn field(&self, idx: usize) -> Option<ArrayData> {
         self.dtypes().get(idx).map(|dtype| {
             self.as_ref()
                 .child(idx, dtype, self.len())
@@ -155,7 +158,7 @@ impl StructArrayTrait for StructArray {
         })
     }
 
-    fn project(&self, projection: &[Field]) -> VortexResult<Array> {
+    fn project(&self, projection: &[Field]) -> VortexResult<ArrayData> {
         self.project(projection).map(|a| a.into_array())
     }
 }
@@ -167,29 +170,43 @@ impl IntoCanonical for StructArray {
     }
 }
 
-impl ArrayValidity for StructArray {
-    fn is_valid(&self, index: usize) -> bool {
-        self.validity().is_valid(index)
+impl ValidityVTable<StructArray> for StructEncoding {
+    fn is_valid(&self, array: &StructArray, index: usize) -> bool {
+        array.validity().is_valid(index)
     }
 
-    fn logical_validity(&self) -> LogicalValidity {
-        self.validity().to_logical(self.len())
+    fn logical_validity(&self, array: &StructArray) -> LogicalValidity {
+        array.validity().to_logical(array.len())
     }
 }
 
-impl AcceptArrayVisitor for StructArray {
-    fn accept(&self, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
-        for (idx, name) in self.names().iter().enumerate() {
-            let child = self
+impl VisitorVTable<StructArray> for StructEncoding {
+    fn accept(&self, array: &StructArray, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
+        for (idx, name) in array.names().iter().enumerate() {
+            let child = array
                 .field(idx)
-                .ok_or_else(|| vortex_err!(OutOfBounds: idx, 0, self.nfields()))?;
+                .ok_or_else(|| vortex_err!(OutOfBounds: idx, 0, array.nfields()))?;
             visitor.visit_child(&format!("\"{}\"", name), &child)?;
         }
         Ok(())
     }
 }
 
-impl ArrayStatisticsCompute for StructArray {}
+impl StatisticsVTable<StructArray> for StructEncoding {
+    fn compute_statistics(&self, array: &StructArray, stat: Stat) -> VortexResult<StatsSet> {
+        Ok(match stat {
+            Stat::UncompressedSizeInBytes => array
+                .children()
+                .map(|f| f.statistics().compute_uncompressed_size_in_bytes())
+                .reduce(|acc, field_size| acc.zip(field_size).map(|(a, b)| a + b))
+                .flatten()
+                .map(|size| StatsSet::of(stat, size))
+                .unwrap_or_default(),
+            Stat::NullCount => StatsSet::of(stat, array.validity().null_count(array.len())?),
+            _ => StatsSet::default(),
+        })
+    }
+}
 
 #[cfg(test)]
 mod test {
@@ -202,7 +219,7 @@ mod test {
     use crate::array::BoolArray;
     use crate::validity::Validity;
     use crate::variants::StructArrayTrait;
-    use crate::IntoArray;
+    use crate::{ArrayLen, IntoArrayData};
 
     #[test]
     fn test_project() {
@@ -211,7 +228,7 @@ mod test {
             vec!["a", "b", "c", "d", "e"],
             DType::Utf8(Nullability::NonNullable),
         );
-        let zs = BoolArray::from_vec(vec![true, true, true, false, false], Validity::NonNullable);
+        let zs = BoolArray::from_iter([true, true, true, false, false]);
 
         let struct_a = StructArray::try_new(
             FieldNames::from(["xs".into(), "ys".into(), "zs".into()]),

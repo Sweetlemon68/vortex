@@ -3,12 +3,12 @@ use std::fmt::{Display, Formatter};
 
 use arrow_ord::cmp;
 use vortex_dtype::{DType, Nullability};
-use vortex_error::{vortex_bail, VortexResult};
+use vortex_error::{vortex_bail, vortex_err, VortexError, VortexResult};
 use vortex_scalar::Scalar;
 
-use crate::array::Constant;
-use crate::arrow::FromArrowArray;
-use crate::{Array, ArrayDType, ArrayDef, IntoCanonical};
+use crate::arrow::{Datum, FromArrowArray};
+use crate::encoding::Encoding;
+use crate::{ArrayDType, ArrayData};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd)]
 pub enum Operator {
@@ -70,57 +70,109 @@ impl Operator {
     }
 }
 
-pub trait CompareFn {
-    fn compare(&self, other: &Array, operator: Operator) -> VortexResult<Array>;
+pub trait CompareFn<Array> {
+    /// Compares two arrays and returns a new boolean array with the result of the comparison.
+    /// Or, returns None if comparison is not supported for these arrays.
+    fn compare(
+        &self,
+        lhs: &Array,
+        rhs: &ArrayData,
+        operator: Operator,
+    ) -> VortexResult<Option<ArrayData>>;
 }
 
-pub trait MaybeCompareFn {
-    fn maybe_compare(&self, other: &Array, operator: Operator) -> Option<VortexResult<Array>>;
+impl<E: Encoding> CompareFn<ArrayData> for E
+where
+    E: CompareFn<E::Array>,
+    for<'a> &'a E::Array: TryFrom<&'a ArrayData, Error = VortexError>,
+{
+    fn compare(
+        &self,
+        lhs: &ArrayData,
+        rhs: &ArrayData,
+        operator: Operator,
+    ) -> VortexResult<Option<ArrayData>> {
+        let lhs_ref = <&E::Array>::try_from(lhs)?;
+        let encoding = lhs
+            .encoding()
+            .as_any()
+            .downcast_ref::<E>()
+            .ok_or_else(|| vortex_err!("Mismatched encoding"))?;
+        CompareFn::compare(encoding, lhs_ref, rhs, operator)
+    }
 }
 
 pub fn compare(
-    left: impl AsRef<Array>,
-    right: impl AsRef<Array>,
+    left: impl AsRef<ArrayData>,
+    right: impl AsRef<ArrayData>,
     operator: Operator,
-) -> VortexResult<Array> {
+) -> VortexResult<ArrayData> {
     let left = left.as_ref();
     let right = right.as_ref();
 
     if left.len() != right.len() {
         vortex_bail!("Compare operations only support arrays of the same length");
     }
-
-    // TODO(adamg): This is a placeholder until we figure out type coercion and casting
     if !left.dtype().eq_ignore_nullability(right.dtype()) {
         vortex_bail!("Compare operations only support arrays of the same type");
     }
 
-    if left.is_encoding(Constant::ID) && !right.is_encoding(Constant::ID) {
+    // Always try to put constants on the right-hand side so encodings can optimise themselves.
+    if left.is_constant() && !right.is_constant() {
         return compare(right, left, operator.swap());
     }
 
-    if let Some(selection) = left.with_dyn(|lhs| lhs.compare(right, operator)) {
-        return selection;
+    // If the RHS is constant and the LHS is Arrow, we can't do any better than arrow_compare.
+    if left.is_arrow() && (right.is_arrow() || right.is_constant()) {
+        return arrow_compare(left, right, operator);
     }
 
-    if let Some(selection) = right.with_dyn(|rhs| rhs.compare(left, operator.swap())) {
-        return selection;
+    if let Some(result) = left
+        .encoding()
+        .compare_fn()
+        .and_then(|f| f.compare(left, right, operator).transpose())
+    {
+        return result;
     }
+
+    if let Some(result) = right
+        .encoding()
+        .compare_fn()
+        .and_then(|f| f.compare(right, left, operator.swap()).transpose())
+    {
+        return result;
+    }
+
+    log::debug!(
+        "No compare implementation found for LHS {}, RHS {}, and operator {} (or inverse)",
+        right.encoding().id(),
+        left.encoding().id(),
+        operator.swap(),
+    );
 
     // Fallback to arrow on canonical types
-    let lhs = left.clone().into_canonical()?.into_arrow()?;
-    let rhs = right.clone().into_canonical()?.into_arrow()?;
+    arrow_compare(left, right, operator)
+}
+
+/// Implementation of `CompareFn` using the Arrow crate.
+pub(crate) fn arrow_compare(
+    lhs: &ArrayData,
+    rhs: &ArrayData,
+    operator: Operator,
+) -> VortexResult<ArrayData> {
+    let lhs = Datum::try_from(lhs.clone())?;
+    let rhs = Datum::try_from(rhs.clone())?;
 
     let array = match operator {
-        Operator::Eq => cmp::eq(&lhs.as_ref(), &rhs.as_ref())?,
-        Operator::NotEq => cmp::neq(&lhs.as_ref(), &rhs.as_ref())?,
-        Operator::Gt => cmp::gt(&lhs.as_ref(), &rhs.as_ref())?,
-        Operator::Gte => cmp::gt_eq(&lhs.as_ref(), &rhs.as_ref())?,
-        Operator::Lt => cmp::lt(&lhs.as_ref(), &rhs.as_ref())?,
-        Operator::Lte => cmp::lt_eq(&lhs.as_ref(), &rhs.as_ref())?,
+        Operator::Eq => cmp::eq(&lhs, &rhs)?,
+        Operator::NotEq => cmp::neq(&lhs, &rhs)?,
+        Operator::Gt => cmp::gt(&lhs, &rhs)?,
+        Operator::Gte => cmp::gt_eq(&lhs, &rhs)?,
+        Operator::Lt => cmp::lt(&lhs, &rhs)?,
+        Operator::Lte => cmp::lt_eq(&lhs, &rhs)?,
     };
 
-    Ok(Array::from_arrow(&array, true))
+    Ok(ArrayData::from_arrow(&array, true))
 }
 
 pub fn scalar_cmp(lhs: &Scalar, rhs: &Scalar, operator: Operator) -> Scalar {
@@ -142,13 +194,13 @@ pub fn scalar_cmp(lhs: &Scalar, rhs: &Scalar, operator: Operator) -> Scalar {
 
 #[cfg(test)]
 mod tests {
+    use arrow_buffer::BooleanBuffer;
     use itertools::Itertools;
-    use vortex_scalar::ScalarValue;
 
     use super::*;
     use crate::array::{BoolArray, ConstantArray};
     use crate::validity::Validity;
-    use crate::{IntoArray, IntoArrayVariant};
+    use crate::{ArrayLen, IntoArrayData, IntoArrayVariant};
 
     fn to_int_indices(indices_bits: BoolArray) -> Vec<u64> {
         let buffer = indices_bits.boolean_buffer();
@@ -171,10 +223,11 @@ mod tests {
 
     #[test]
     fn test_bool_basic_comparisons() {
-        let arr = BoolArray::from_vec(
-            vec![true, true, false, true, false],
-            Validity::Array(BoolArray::from(vec![false, true, true, true, true]).into_array()),
+        let arr = BoolArray::try_new(
+            BooleanBuffer::from_iter([true, true, false, true, false]),
+            Validity::from_iter([false, true, true, true, true]),
         )
+        .unwrap()
         .into_array();
 
         let matches = compare(&arr, &arr, Operator::Eq)
@@ -191,10 +244,11 @@ mod tests {
         let empty: [u64; 0] = [];
         assert_eq!(to_int_indices(matches), empty);
 
-        let other = BoolArray::from_vec(
-            vec![false, false, false, true, true],
-            Validity::Array(BoolArray::from(vec![false, true, true, true, true]).into_array()),
+        let other = BoolArray::try_new(
+            BooleanBuffer::from_iter([false, false, false, true, true]),
+            Validity::from_iter([false, true, true, true, true]),
         )
+        .unwrap()
         .into_array();
 
         let matches = compare(&arr, &other, Operator::Lte)
@@ -227,8 +281,9 @@ mod tests {
         let left = ConstantArray::new(Scalar::from(2u32), 10);
         let right = ConstantArray::new(Scalar::from(10u32), 10);
 
-        let res = ConstantArray::try_from(compare(left, right, Operator::Gt).unwrap()).unwrap();
-        assert_eq!(res.scalar_value(), &ScalarValue::Bool(false));
-        assert_eq!(res.len(), 10);
+        let compare = compare(left, right, Operator::Gt).unwrap();
+        let res = compare.as_constant().unwrap();
+        assert_eq!(res.as_bool().value(), Some(false));
+        assert_eq!(compare.len(), 10);
     }
 }

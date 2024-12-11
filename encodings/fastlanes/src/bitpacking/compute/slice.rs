@@ -3,38 +3,39 @@ use std::cmp::max;
 use vortex_array::array::SparseArray;
 use vortex_array::compute::{slice, SliceFn};
 use vortex_array::variants::PrimitiveArrayTrait;
-use vortex_array::{Array, IntoArray};
+use vortex_array::{ArrayData, IntoArrayData};
 use vortex_error::{VortexExpect, VortexResult};
 
-use crate::BitPackedArray;
+use crate::{BitPackedArray, BitPackedEncoding};
 
-impl SliceFn for BitPackedArray {
-    fn slice(&self, start: usize, stop: usize) -> VortexResult<Array> {
-        let offset_start = start + self.offset() as usize;
-        let offset_stop = stop + self.offset() as usize;
+impl SliceFn<BitPackedArray> for BitPackedEncoding {
+    fn slice(&self, array: &BitPackedArray, start: usize, stop: usize) -> VortexResult<ArrayData> {
+        let offset_start = start + array.offset() as usize;
+        let offset_stop = stop + array.offset() as usize;
         let offset = offset_start % 1024;
         let block_start = max(0, offset_start - offset);
         let block_stop = ((offset_stop + 1023) / 1024) * 1024;
 
-        let encoded_start = (block_start / 8) * self.bit_width() as usize;
-        let encoded_stop = (block_stop / 8) * self.bit_width() as usize;
+        let encoded_start = (block_start / 8) * array.bit_width() as usize;
+        let encoded_stop = (block_stop / 8) * array.bit_width() as usize;
         // slice the buffer using the encoded start/stop values
-        Self::try_new_from_offset(
-            self.packed().slice(encoded_start..encoded_stop),
-            self.ptype(),
-            self.validity().slice(start, stop)?,
-            self.patches()
+        BitPackedArray::try_new_from_offset(
+            array.packed().slice(encoded_start..encoded_stop),
+            array.ptype(),
+            array.validity().slice(start, stop)?,
+            array
+                .patches()
                 .map(|p| slice(&p, start, stop))
                 .transpose()?
                 .filter(|a| {
                     // If the sliced patch_indices is empty, we should not propagate the patches.
                     // There may be other logic that depends on Some(patches) indicating non-empty.
-                    !SparseArray::try_from(a)
+                    !SparseArray::maybe_from(a.clone())
                         .vortex_expect("BitPackedArray must encode patches as SparseArray")
                         .indices()
                         .is_empty()
                 }),
-            self.bit_width(),
+            array.bit_width(),
             stop - start,
             offset as u16,
         )
@@ -46,9 +47,8 @@ impl SliceFn for BitPackedArray {
 mod test {
     use itertools::Itertools;
     use vortex_array::array::{PrimitiveArray, SparseArray};
-    use vortex_array::compute::unary::scalar_at;
-    use vortex_array::compute::{slice, take};
-    use vortex_array::IntoArray;
+    use vortex_array::compute::{scalar_at, slice, take, TakeOptions};
+    use vortex_array::{ArrayLen, IntoArrayData};
 
     use crate::BitPackedArray;
 
@@ -201,6 +201,7 @@ mod test {
         let taken = take(
             &sliced,
             PrimitiveArray::from(vec![101i64, 1125i64, 1138i64]).as_ref(),
+            TakeOptions::default(),
         )
         .unwrap();
         assert_eq!(taken.len(), 3);

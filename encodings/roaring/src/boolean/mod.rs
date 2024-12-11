@@ -1,23 +1,22 @@
 use std::fmt::{Debug, Display};
+use std::sync::Arc;
 
 use arrow_buffer::{BooleanBuffer, MutableBuffer};
 pub use compress::*;
 use croaring::Native;
 pub use croaring::{Bitmap, Portable};
 use serde::{Deserialize, Serialize};
-use vortex_array::aliases::hash_map::HashMap;
-use vortex_array::array::visitor::{AcceptArrayVisitor, ArrayVisitor};
 use vortex_array::array::BoolArray;
 use vortex_array::encoding::ids;
-use vortex_array::stats::{Stat, StatsSet};
-use vortex_array::validity::{ArrayValidity, LogicalValidity, Validity};
-use vortex_array::variants::{ArrayVariants, BoolArrayTrait};
+use vortex_array::stats::StatsSet;
+use vortex_array::validity::{LogicalValidity, ValidityVTable};
+use vortex_array::variants::{BoolArrayTrait, VariantsVTable};
+use vortex_array::visitor::{ArrayVisitor, VisitorVTable};
 use vortex_array::{
-    impl_encoding, Array, ArrayTrait, Canonical, IntoArray, IntoCanonical, TypedArray,
+    impl_encoding, ArrayData, ArrayLen, ArrayTrait, Canonical, IntoArrayData, IntoCanonical,
 };
 use vortex_buffer::Buffer;
-use vortex_dtype::DType;
-use vortex_dtype::Nullability::NonNullable;
+use vortex_dtype::{DType, Nullability};
 use vortex_error::{vortex_bail, vortex_err, VortexExpect as _, VortexResult};
 
 mod compress;
@@ -37,35 +36,30 @@ impl Display for RoaringBoolMetadata {
 
 impl RoaringBoolArray {
     pub fn try_new(bitmap: Bitmap, length: usize) -> VortexResult<Self> {
-        if length < bitmap.cardinality() as usize {
-            vortex_bail!("RoaringBoolArray length is less than bitmap cardinality")
-        } else {
-            let roaring_stats = bitmap.statistics();
-            let stats = StatsSet::from(HashMap::from([
-                (
-                    Stat::Min,
-                    (roaring_stats.cardinality == length as u64).into(),
-                ),
-                (Stat::Max, (roaring_stats.cardinality > 0).into()),
-                (
-                    Stat::IsConstant,
-                    (roaring_stats.cardinality == length as u64 || roaring_stats.cardinality == 0)
-                        .into(),
-                ),
-                (Stat::TrueCount, roaring_stats.cardinality.into()),
-            ]));
-
-            Ok(Self {
-                typed: TypedArray::try_from_parts(
-                    DType::Bool(NonNullable),
-                    length,
-                    RoaringBoolMetadata,
-                    Some(Buffer::from(bitmap.serialize::<Native>())),
-                    vec![].into(),
-                    stats,
-                )?,
-            })
+        let max_set = bitmap.maximum().unwrap_or(0) as usize;
+        if length < max_set {
+            vortex_bail!(
+                "RoaringBoolArray length is less than bitmap maximum {}",
+                max_set
+            )
         }
+
+        let stats = StatsSet::bools_with_true_and_null_count(
+            bitmap.statistics().cardinality as usize,
+            0,
+            length,
+        );
+
+        ArrayData::try_new_owned(
+            &RoaringBoolEncoding,
+            DType::Bool(Nullability::NonNullable),
+            length,
+            Arc::new(RoaringBoolMetadata),
+            Some(Buffer::from(bitmap.serialize::<Native>())),
+            vec![].into(),
+            stats,
+        )?
+        .try_into()
     }
 
     pub fn bitmap(&self) -> Bitmap {
@@ -73,7 +67,7 @@ impl RoaringBoolArray {
         Bitmap::deserialize::<Native>(self.buffer().as_ref())
     }
 
-    pub fn encode(array: Array) -> VortexResult<Array> {
+    pub fn encode(array: ArrayData) -> VortexResult<ArrayData> {
         if let Ok(bools) = BoolArray::try_from(array) {
             roaring_bool_encode(bools).map(|a| a.into_array())
         } else {
@@ -90,44 +84,31 @@ impl RoaringBoolArray {
 
 impl ArrayTrait for RoaringBoolArray {}
 
-impl ArrayVariants for RoaringBoolArray {
-    fn as_bool_array(&self) -> Option<&dyn BoolArrayTrait> {
-        Some(self)
+impl VariantsVTable<RoaringBoolArray> for RoaringBoolEncoding {
+    fn as_bool_array<'a>(&self, array: &'a RoaringBoolArray) -> Option<&'a dyn BoolArrayTrait> {
+        Some(array)
     }
 }
 
-impl BoolArrayTrait for RoaringBoolArray {
-    fn invert(&self) -> VortexResult<Array> {
-        RoaringBoolArray::try_new(self.bitmap().flip(0..(self.len() as u32)), self.len())
-            .map(|a| a.into_array())
-    }
+impl BoolArrayTrait for RoaringBoolArray {}
 
-    fn maybe_null_indices_iter<'a>(&'a self) -> Box<dyn Iterator<Item = usize> + 'a> {
-        todo!()
-    }
-
-    fn maybe_null_slices_iter<'a>(&'a self) -> Box<dyn Iterator<Item = (usize, usize)> + 'a> {
-        todo!()
-    }
-}
-
-impl AcceptArrayVisitor for RoaringBoolArray {
-    fn accept(&self, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
+impl VisitorVTable<RoaringBoolArray> for RoaringBoolEncoding {
+    fn accept(&self, array: &RoaringBoolArray, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
         // TODO(ngates): should we store a buffer in memory? Or delay serialization?
         //  Or serialize into metadata? The only reason we support buffers is so we can write to
         //  the wire without copying into FlatBuffers. But if we need to allocate to serialize
         //  the bitmap anyway, then may as well shove it into metadata.
-        visitor.visit_buffer(self.buffer())
+        visitor.visit_buffer(array.buffer())
     }
 }
 
-impl ArrayValidity for RoaringBoolArray {
-    fn is_valid(&self, _index: usize) -> bool {
+impl ValidityVTable<RoaringBoolArray> for RoaringBoolEncoding {
+    fn is_valid(&self, _array: &RoaringBoolArray, _index: usize) -> bool {
         true
     }
 
-    fn logical_validity(&self) -> LogicalValidity {
-        LogicalValidity::AllValid(self.len())
+    fn logical_validity(&self, array: &RoaringBoolArray) -> LogicalValidity {
+        LogicalValidity::AllValid(array.len())
     }
 }
 
@@ -146,11 +127,10 @@ impl IntoCanonical for RoaringBoolArray {
         if byte_length > bitset.size_in_bytes() {
             buffer.extend_zeros(byte_length - bitset.size_in_bytes());
         }
-        BoolArray::try_new(
+        Ok(Canonical::Bool(BoolArray::new(
             BooleanBuffer::new(buffer.into(), 0, self.len()),
-            Validity::NonNullable,
-        )
-        .map(Canonical::Bool)
+            Nullability::NonNullable,
+        )))
     }
 }
 
@@ -159,14 +139,14 @@ mod test {
     use std::iter;
 
     use vortex_array::array::BoolArray;
-    use vortex_array::{IntoArray, IntoArrayVariant};
+    use vortex_array::{ArrayLen, IntoArrayData, IntoArrayVariant};
 
     use crate::RoaringBoolArray;
 
     #[test]
     #[cfg_attr(miri, ignore)]
     pub fn iter() {
-        let bool: BoolArray = BoolArray::from(vec![true, false, true, true]);
+        let bool: BoolArray = BoolArray::from_iter([true, false, true, true]);
         let array = RoaringBoolArray::encode(bool.into_array()).unwrap();
         let round_trip = RoaringBoolArray::try_from(array).unwrap();
         let values = round_trip.bitmap().to_vec();
@@ -176,11 +156,10 @@ mod test {
     #[test]
     #[cfg_attr(miri, ignore)]
     pub fn trailing_false() {
-        let bool: BoolArray = BoolArray::from(
-            vec![true, true]
+        let bool: BoolArray = BoolArray::from_iter(
+            [true, true]
                 .into_iter()
-                .chain(iter::repeat(false).take(100))
-                .collect::<Vec<_>>(),
+                .chain(iter::repeat(false).take(100)),
         );
         let array = RoaringBoolArray::encode(bool.into_array()).unwrap();
         let round_trip = RoaringBoolArray::try_from(array).unwrap();

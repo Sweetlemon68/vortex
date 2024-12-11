@@ -3,13 +3,13 @@ use std::sync::Arc;
 
 use fsst::{Decompressor, Symbol};
 use serde::{Deserialize, Serialize};
-use vortex_array::array::visitor::{AcceptArrayVisitor, ArrayVisitor};
-use vortex_array::array::{VarBin, VarBinArray};
-use vortex_array::encoding::ids;
-use vortex_array::stats::{ArrayStatisticsCompute, StatsSet};
-use vortex_array::validity::{ArrayValidity, LogicalValidity, Validity};
-use vortex_array::variants::{ArrayVariants, BinaryArrayTrait, Utf8ArrayTrait};
-use vortex_array::{impl_encoding, Array, ArrayDType, ArrayDef, ArrayTrait, IntoCanonical};
+use vortex_array::array::{VarBinArray, VarBinEncoding};
+use vortex_array::encoding::{ids, Encoding};
+use vortex_array::stats::{StatisticsVTable, StatsSet};
+use vortex_array::validity::{ArrayValidity, LogicalValidity, Validity, ValidityVTable};
+use vortex_array::variants::{BinaryArrayTrait, Utf8ArrayTrait, VariantsVTable};
+use vortex_array::visitor::{ArrayVisitor, VisitorVTable};
+use vortex_array::{impl_encoding, ArrayDType, ArrayData, ArrayLen, ArrayTrait, IntoCanonical};
 use vortex_dtype::{DType, Nullability, PType};
 use vortex_error::{vortex_bail, VortexExpect, VortexResult};
 
@@ -42,10 +42,10 @@ impl FSSTArray {
     /// which tells the decoder to emit the following byte without doing a table lookup.
     pub fn try_new(
         dtype: DType,
-        symbols: Array,
-        symbol_lengths: Array,
-        codes: Array,
-        uncompressed_lengths: Array,
+        symbols: ArrayData,
+        symbol_lengths: ArrayData,
+        codes: ArrayData,
+        uncompressed_lengths: ArrayData,
     ) -> VortexResult<Self> {
         // Check: symbols must be a u64 array
         if symbols.dtype() != &SYMBOLS_DTYPE {
@@ -70,10 +70,10 @@ impl FSSTArray {
         }
 
         if !uncompressed_lengths.dtype().is_int() || uncompressed_lengths.dtype().is_nullable() {
-            vortex_bail!(InvalidArgument: "uncompressed_lengths must have integer type and cannot be nullable");
+            vortex_bail!(InvalidArgument: "uncompressed_lengths must have integer type and cannot be nullable, found {}", uncompressed_lengths.dtype());
         }
 
-        if codes.encoding().id() != VarBin::ID {
+        if codes.encoding().id() != VarBinEncoding::ID {
             vortex_bail!(
                 InvalidArgument: "codes must have varbin encoding, was {}",
                 codes.encoding().id()
@@ -100,26 +100,26 @@ impl FSSTArray {
                 uncompressed_lengths_ptype,
             },
             children,
-            StatsSet::new(),
+            StatsSet::default(),
         )
     }
 
     /// Access the symbol table array
-    pub fn symbols(&self) -> Array {
+    pub fn symbols(&self) -> ArrayData {
         self.as_ref()
             .child(0, &SYMBOLS_DTYPE, self.metadata().symbols_len)
             .vortex_expect("FSSTArray symbols child")
     }
 
     /// Access the symbol table array
-    pub fn symbol_lengths(&self) -> Array {
+    pub fn symbol_lengths(&self) -> ArrayData {
         self.as_ref()
             .child(1, &SYMBOL_LENS_DTYPE, self.metadata().symbols_len)
             .vortex_expect("FSSTArray symbol_lengths child")
     }
 
     /// Access the codes array
-    pub fn codes(&self) -> Array {
+    pub fn codes(&self) -> ArrayData {
         self.as_ref()
             .child(2, &self.codes_dtype(), self.len())
             .vortex_expect("FSSTArray codes child")
@@ -132,7 +132,7 @@ impl FSSTArray {
     }
 
     /// Get the uncompressed length for each element in the array.
-    pub fn uncompressed_lengths(&self) -> Array {
+    pub fn uncompressed_lengths(&self) -> ArrayData {
         self.as_ref()
             .child(3, &self.uncompressed_lengths_dtype(), self.len())
             .vortex_expect("FSST uncompressed_lengths child")
@@ -189,34 +189,34 @@ impl FSSTArray {
     }
 }
 
-impl AcceptArrayVisitor for FSSTArray {
-    fn accept(&self, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
-        visitor.visit_child("symbols", &self.symbols())?;
-        visitor.visit_child("symbol_lengths", &self.symbol_lengths())?;
-        visitor.visit_child("codes", &self.codes())?;
-        visitor.visit_child("uncompressed_lengths", &self.uncompressed_lengths())
+impl VisitorVTable<FSSTArray> for FSSTEncoding {
+    fn accept(&self, array: &FSSTArray, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
+        visitor.visit_child("symbols", &array.symbols())?;
+        visitor.visit_child("symbol_lengths", &array.symbol_lengths())?;
+        visitor.visit_child("codes", &array.codes())?;
+        visitor.visit_child("uncompressed_lengths", &array.uncompressed_lengths())
     }
 }
 
-impl ArrayStatisticsCompute for FSSTArray {}
+impl StatisticsVTable<FSSTArray> for FSSTEncoding {}
 
-impl ArrayValidity for FSSTArray {
-    fn is_valid(&self, index: usize) -> bool {
-        self.codes().with_dyn(|a| a.is_valid(index))
+impl ValidityVTable<FSSTArray> for FSSTEncoding {
+    fn is_valid(&self, array: &FSSTArray, index: usize) -> bool {
+        array.codes().is_valid(index)
     }
 
-    fn logical_validity(&self) -> LogicalValidity {
-        self.codes().with_dyn(|a| a.logical_validity())
+    fn logical_validity(&self, array: &FSSTArray) -> LogicalValidity {
+        array.codes().logical_validity()
     }
 }
 
-impl ArrayVariants for FSSTArray {
-    fn as_utf8_array(&self) -> Option<&dyn Utf8ArrayTrait> {
-        Some(self)
+impl VariantsVTable<FSSTArray> for FSSTEncoding {
+    fn as_utf8_array<'a>(&self, array: &'a FSSTArray) -> Option<&'a dyn Utf8ArrayTrait> {
+        Some(array)
     }
 
-    fn as_binary_array(&self) -> Option<&dyn BinaryArrayTrait> {
-        Some(self)
+    fn as_binary_array<'a>(&self, array: &'a FSSTArray) -> Option<&'a dyn BinaryArrayTrait> {
+        Some(array)
     }
 }
 

@@ -1,24 +1,29 @@
 use std::fmt::{Debug, Display};
+use std::sync::Arc;
 
-use arrow_buffer::bit_iterator::{BitIndexIterator, BitSliceIterator};
-use arrow_buffer::{BooleanBuffer, BooleanBufferBuilder, MutableBuffer};
+use arrow_array::BooleanArray;
+use arrow_buffer::{BooleanBufferBuilder, MutableBuffer};
 use itertools::Itertools;
 use num_traits::AsPrimitive;
 use serde::{Deserialize, Serialize};
 use vortex_buffer::Buffer;
-use vortex_dtype::DType;
+use vortex_dtype::{DType, Nullability};
 use vortex_error::{vortex_bail, VortexExpect as _, VortexResult};
 
-use crate::array::visitor::{AcceptArrayVisitor, ArrayVisitor};
 use crate::encoding::ids;
 use crate::stats::StatsSet;
-use crate::validity::{ArrayValidity, LogicalValidity, Validity, ValidityMetadata};
-use crate::variants::{ArrayVariants, BoolArrayTrait};
-use crate::{impl_encoding, Array, ArrayTrait, Canonical, IntoArray, IntoCanonical, TypedArray};
+use crate::validity::{LogicalValidity, Validity, ValidityMetadata, ValidityVTable};
+use crate::variants::{BoolArrayTrait, VariantsVTable};
+use crate::visitor::{ArrayVisitor, VisitorVTable};
+use crate::{
+    impl_encoding, ArrayData, ArrayLen, ArrayTrait, Canonical, IntoArrayData, IntoCanonical,
+};
 
-mod accessors;
-mod compute;
+pub mod compute;
 mod stats;
+
+// Re-export the BooleanBuffer type on our API surface.
+pub use arrow_buffer::BooleanBuffer;
 
 impl_encoding!("vortex.bool", ids::BOOL, Bool);
 
@@ -93,6 +98,18 @@ impl BoolArray {
         })
     }
 
+    /// Create a new BoolArray from a buffer and nullability.
+    pub fn new(buffer: BooleanBuffer, nullability: Nullability) -> Self {
+        let validity = match nullability {
+            Nullability::Nullable => Validity::AllValid,
+            Nullability::NonNullable => Validity::NonNullable,
+        };
+        Self::try_new(buffer, validity).vortex_expect("Validity length cannot be mismatched")
+    }
+
+    /// Create a new BoolArray from a buffer and validity metadata.
+    /// Returns an error if the validity length does not match the buffer length.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn try_new(buffer: BooleanBuffer, validity: Validity) -> VortexResult<Self> {
         let buffer_len = buffer.len();
         let buffer_offset = buffer.offset();
@@ -103,24 +120,19 @@ impl BoolArray {
             .into_inner()
             .bit_slice(buffer_byte_offset, buffer_len);
 
-        Ok(Self {
-            typed: TypedArray::try_from_parts(
-                DType::Bool(validity.nullability()),
-                buffer_len,
-                BoolMetadata {
-                    validity: validity.to_metadata(buffer_len)?,
-                    first_byte_bit_offset,
-                },
-                Some(Buffer::from(inner)),
-                validity.into_array().into_iter().collect_vec().into(),
-                StatsSet::new(),
-            )?,
-        })
-    }
-
-    pub fn from_vec(bools: Vec<bool>, validity: Validity) -> Self {
-        let buffer = BooleanBuffer::from(bools);
-        Self::try_new(buffer, validity).vortex_expect("Failed to create BoolArray from vec")
+        ArrayData::try_new_owned(
+            &BoolEncoding,
+            DType::Bool(validity.nullability()),
+            buffer_len,
+            Arc::new(BoolMetadata {
+                validity: validity.to_metadata(buffer_len)?,
+                first_byte_bit_offset,
+            }),
+            Some(Buffer::from(inner)),
+            validity.into_array().into_iter().collect_vec().into(),
+            StatsSet::default(),
+        )?
+        .try_into()
     }
 
     pub fn patch<P: AsPrimitive<usize>>(
@@ -150,58 +162,51 @@ impl BoolArray {
 
         Self::try_new(own_values.finish().slice(bit_offset, len), result_validity)
     }
+
+    /// Create a new BoolArray from a set of indices and a length.
+    /// All indices must be less than the length.
+    pub fn from_indices<I: IntoIterator<Item = usize>>(length: usize, indices: I) -> Self {
+        let mut buffer = MutableBuffer::new_null(length);
+        indices
+            .into_iter()
+            .for_each(|idx| arrow_buffer::bit_util::set_bit(&mut buffer, idx));
+        Self::new(
+            BooleanBufferBuilder::new_from_buffer(buffer, length).finish(),
+            Nullability::NonNullable,
+        )
+    }
 }
 
 impl ArrayTrait for BoolArray {}
 
-impl ArrayVariants for BoolArray {
-    fn as_bool_array(&self) -> Option<&dyn BoolArrayTrait> {
-        Some(self)
+impl VariantsVTable<BoolArray> for BoolEncoding {
+    fn as_bool_array<'a>(&self, array: &'a BoolArray) -> Option<&'a dyn BoolArrayTrait> {
+        Some(array)
     }
 }
 
-impl BoolArrayTrait for BoolArray {
-    fn invert(&self) -> VortexResult<Array> {
-        BoolArray::try_new(!&self.boolean_buffer(), self.validity()).map(|a| a.into_array())
-    }
-
-    fn maybe_null_indices_iter<'a>(&'a self) -> Box<dyn Iterator<Item = usize> + 'a> {
-        Box::new(BitIndexIterator::new(self.buffer(), 0, self.len()))
-    }
-
-    fn maybe_null_slices_iter<'a>(&'a self) -> Box<dyn Iterator<Item = (usize, usize)> + 'a> {
-        Box::new(BitSliceIterator::new(self.buffer(), 0, self.len()))
-    }
-}
+impl BoolArrayTrait for BoolArray {}
 
 impl From<BooleanBuffer> for BoolArray {
     fn from(value: BooleanBuffer) -> Self {
-        Self::try_new(value, Validity::NonNullable)
-            .vortex_expect("Failed to create BoolArray from BooleanBuffer")
+        Self::new(value, Nullability::NonNullable)
     }
 }
 
-impl From<Vec<bool>> for BoolArray {
-    fn from(value: Vec<bool>) -> Self {
-        Self::from_vec(value, Validity::NonNullable)
+impl FromIterator<bool> for BoolArray {
+    fn from_iter<T: IntoIterator<Item = bool>>(iter: T) -> Self {
+        Self::new(BooleanBuffer::from_iter(iter), Nullability::NonNullable)
     }
 }
 
 impl FromIterator<Option<bool>> for BoolArray {
     fn from_iter<I: IntoIterator<Item = Option<bool>>>(iter: I) -> Self {
-        let iter = iter.into_iter();
-        let (lower, _) = iter.size_hint();
-
-        let mut validity: Vec<bool> = Vec::with_capacity(lower);
-        let values: Vec<bool> = iter
-            .map(|i| {
-                validity.push(i.is_some());
-                i.unwrap_or_default()
-            })
-            .collect::<Vec<_>>();
-
-        Self::try_new(BooleanBuffer::from(values), Validity::from(validity))
-            .vortex_expect("Failed to create BoolArray from iterator of Option<bool>")
+        let (buffer, nulls) = BooleanArray::from_iter(iter).into_parts();
+        Self::try_new(
+            buffer,
+            nulls.map(Validity::from).unwrap_or(Validity::AllValid),
+        )
+        .vortex_expect("Validity length cannot be mismatched")
     }
 }
 
@@ -211,38 +216,35 @@ impl IntoCanonical for BoolArray {
     }
 }
 
-impl ArrayValidity for BoolArray {
-    fn is_valid(&self, index: usize) -> bool {
-        self.validity().is_valid(index)
+impl ValidityVTable<BoolArray> for BoolEncoding {
+    fn is_valid(&self, array: &BoolArray, index: usize) -> bool {
+        array.validity().is_valid(index)
     }
 
-    fn logical_validity(&self) -> LogicalValidity {
-        self.validity().to_logical(self.len())
+    fn logical_validity(&self, array: &BoolArray) -> LogicalValidity {
+        array.validity().to_logical(array.len())
     }
 }
 
-impl AcceptArrayVisitor for BoolArray {
-    fn accept(&self, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
-        visitor.visit_buffer(self.buffer())?;
-        visitor.visit_validity(&self.validity())
+impl VisitorVTable<BoolArray> for BoolEncoding {
+    fn accept(&self, array: &BoolArray, visitor: &mut dyn ArrayVisitor) -> VortexResult<()> {
+        visitor.visit_buffer(array.buffer())?;
+        visitor.visit_validity(&array.validity())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use arrow_buffer::BooleanBuffer;
-    use itertools::Itertools;
 
     use crate::array::BoolArray;
-    use crate::compute::slice;
-    use crate::compute::unary::scalar_at;
+    use crate::compute::{scalar_at, slice};
     use crate::validity::Validity;
-    use crate::variants::BoolArrayTrait;
-    use crate::{IntoArray, IntoArrayVariant};
+    use crate::{IntoArrayData, IntoArrayVariant};
 
     #[test]
     fn bool_array() {
-        let arr = BoolArray::from(vec![true, false, true]).into_array();
+        let arr = BoolArray::from_iter([true, false, true]).into_array();
         let scalar = bool::try_from(&scalar_at(&arr, 0).unwrap()).unwrap();
         assert!(scalar);
     }
@@ -280,30 +282,6 @@ mod tests {
 
         let scalar = scalar_at(&arr, 4).unwrap();
         assert!(scalar.is_null());
-    }
-
-    #[test]
-    fn constant_iter_true_test() {
-        let arr = BoolArray::from(vec![true, true, true]);
-        assert_eq!(vec![0, 1, 2], arr.maybe_null_indices_iter().collect_vec());
-        assert_eq!(vec![(0, 3)], arr.maybe_null_slices_iter().collect_vec());
-    }
-
-    #[test]
-    fn constant_iter_true_false_test() {
-        let arr = BoolArray::from(vec![true, false, true]);
-        assert_eq!(vec![0, 2], arr.maybe_null_indices_iter().collect_vec());
-        assert_eq!(
-            vec![(0, 1), (2, 3)],
-            arr.maybe_null_slices_iter().collect_vec()
-        );
-    }
-
-    #[test]
-    fn constant_iter_false_test() {
-        let arr = BoolArray::from(vec![false, false, false]);
-        assert_eq!(0, arr.maybe_null_indices_iter().collect_vec().len());
-        assert_eq!(0, arr.maybe_null_slices_iter().collect_vec().len());
     }
 
     #[test]

@@ -1,12 +1,9 @@
-use vortex_alp::{
-    alp_encode_components, match_each_alp_float_ptype, ALPArray, ALPEncoding, ALPRDEncoding, ALP,
-};
+use vortex_alp::{alp_encode_components, match_each_alp_float_ptype, ALPArray, ALPEncoding};
 use vortex_array::aliases::hash_set::HashSet;
 use vortex_array::array::PrimitiveArray;
-use vortex_array::encoding::EncodingRef;
-use vortex_array::stats::ArrayStatistics as _;
+use vortex_array::encoding::{Encoding, EncodingRef};
 use vortex_array::variants::PrimitiveArrayTrait;
-use vortex_array::{Array, ArrayDef, IntoArray};
+use vortex_array::{ArrayData, IntoArrayData, IntoArrayVariant};
 use vortex_dtype::PType;
 use vortex_error::VortexResult;
 
@@ -19,16 +16,16 @@ pub struct ALPCompressor;
 
 impl EncodingCompressor for ALPCompressor {
     fn id(&self) -> &str {
-        ALP::ID.as_ref()
+        ALPEncoding::ID.as_ref()
     }
 
     fn cost(&self) -> u8 {
         constants::ALP_COST
     }
 
-    fn can_compress(&self, array: &Array) -> Option<&dyn EncodingCompressor> {
+    fn can_compress(&self, array: &ArrayData) -> Option<&dyn EncodingCompressor> {
         // Only support primitive arrays
-        let parray = PrimitiveArray::try_from(array).ok()?;
+        let parray = PrimitiveArray::maybe_from(array.clone())?;
 
         // Only supports f32 and f64
         if !matches!(parray.ptype(), PType::F32 | PType::F64) {
@@ -40,12 +37,12 @@ impl EncodingCompressor for ALPCompressor {
 
     fn compress<'a>(
         &'a self,
-        array: &Array,
+        array: &ArrayData,
         like: Option<CompressionTree<'a>>,
         ctx: SamplingCompressor<'a>,
     ) -> VortexResult<CompressedArray<'a>> {
         // TODO(robert): Fill forward nulls?
-        let parray = array.as_primitive();
+        let parray = array.clone().into_primitive()?;
 
         let (exponents, encoded, patches) = match_each_alp_float_ptype!(
             parray.ptype(), |$T| {
@@ -80,11 +77,11 @@ impl EncodingCompressor for ALPCompressor {
                     compressed_patches.and_then(|p| p.path),
                 ],
             )),
-            Some(array.statistics()),
+            array,
         ))
     }
 
     fn used_encodings(&self) -> HashSet<EncodingRef> {
-        HashSet::from([&ALPEncoding as EncodingRef, &ALPRDEncoding])
+        HashSet::from([&ALPEncoding as EncodingRef])
     }
 }

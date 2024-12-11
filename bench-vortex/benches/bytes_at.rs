@@ -1,7 +1,6 @@
 //! Benchmark for the `bytes_at` operation on a VarBinView.
 //! This measures the performance of accessing an individual byte-slice in a VarBinViewArray.
 
-use std::io::Cursor;
 use std::sync::Arc;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
@@ -10,10 +9,11 @@ use futures::StreamExt;
 use vortex::array::{PrimitiveArray, VarBinArray, VarBinViewArray};
 use vortex::buffer::Buffer;
 use vortex::dtype::{DType, Nullability};
-use vortex::serde::stream_reader::StreamArrayReader;
-use vortex::serde::stream_writer::StreamArrayWriter;
+use vortex::io::VortexBufReader;
+use vortex::ipc::stream_reader::StreamArrayReader;
+use vortex::ipc::stream_writer::StreamArrayWriter;
 use vortex::validity::Validity;
-use vortex::{Context, IntoArray, IntoCanonical};
+use vortex::{Context, IntoArrayData, IntoCanonical};
 
 fn array_data_fixture() -> VarBinArray {
     VarBinArray::try_new(
@@ -35,7 +35,11 @@ fn array_view_fixture() -> VarBinViewArray {
     let buffer = Buffer::from(buffer);
 
     let ctx = Arc::new(Context::default());
-    let reader = block_on(StreamArrayReader::try_new(Cursor::new(buffer), ctx.clone())).unwrap();
+    let reader = block_on(StreamArrayReader::try_new(
+        VortexBufReader::new(buffer),
+        ctx.clone(),
+    ))
+    .unwrap();
     let reader = block_on(reader.load_dtype()).unwrap();
 
     let mut stream = Box::pin(reader.into_array_stream());

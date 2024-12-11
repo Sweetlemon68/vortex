@@ -170,6 +170,7 @@ prof/
 *.lprof
 *.callgrind
 result.json
+profile.json
 
 # zig language server
 zig-cache/
@@ -192,7 +193,7 @@ benchmarks/.out
 *.vortex
 
 # TPC-H benchmarking data
-data/
+/data/
 
 # vscode
 .vscode/
@@ -202,3 +203,5 @@ data/
 
 # Zed
 .zed/
+
+*.plan
