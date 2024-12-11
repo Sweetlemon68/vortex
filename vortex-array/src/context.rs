@@ -12,6 +12,12 @@ pub struct Context {
 }
 
 impl Context {
+    pub fn empty() -> Self {
+        Self {
+            encodings: HashMap::new(),
+        }
+    }
+
     pub fn with_encoding(mut self, encoding: EncodingRef) -> Self {
         self.encodings.insert(encoding.id().code(), encoding);
         self

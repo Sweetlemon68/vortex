@@ -222,6 +222,59 @@ pub enum ReadState {
     Finished,
 }
 
+pub struct DTypeBufferReader {
+    #[allow(dead_code)]
+    state: ReadState,
+    #[allow(dead_code)]
+    dtype: DType,
+}
+
+impl Default for DTypeBufferReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DTypeBufferReader {
+    pub fn new() -> Self {
+        Self {
+            state: ReadState::Init,
+            dtype: DType::Null,
+        }
+    }
+    #[allow(dead_code)]
+    pub fn read(&mut self, mut bytes: Bytes) -> VortexResult<Option<usize>> {
+        match self.state {
+            ReadState::Init => {
+                self.state = ReadState::ReadingLength;
+                Ok(Some(MESSAGE_PREFIX_LENGTH))
+            }
+            ReadState::ReadingLength => {
+                self.state = ReadState::ReadingFb;
+                Ok(Some(bytes.get_u32_le() as usize))
+            }
+            ReadState::ReadingFb => {
+                let schema = root::<fb::Message>(&bytes)?
+                    .header_as_schema()
+                    .ok_or_else(|| vortex_err!("Message was not a schema"))?;
+                self.dtype = DType::try_from(
+                    schema
+                        .dtype()
+                        .ok_or_else(|| vortex_err!(InvalidSerde: "Schema missing DType"))?,
+                )?;
+                self.state = ReadState::Finished;
+                Ok(None)
+            }
+            ReadState::Finished => vortex_bail!("Reader is already finished"),
+            _ => unreachable!("Invalid state"),
+        }
+    }
+    #[allow(dead_code)]
+    pub fn into_dtype(self) -> DType {
+        self.dtype
+    }
+}
+
 pub struct ArrayMessageReader {
     state: ReadState,
     fb_msg: Option<Buffer>,
