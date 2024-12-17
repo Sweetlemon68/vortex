@@ -185,6 +185,40 @@ pub struct CompressConfig {
     target_block_size: usize,
 }
 
+impl CompressConfig {
+    pub fn new(
+        sample_size: u16,
+        sample_count: u16,
+        rng_seed: u64,
+        max_cost: u8,
+        objective: Objective,
+        target_block_bytesize: usize,
+        target_block_size: usize,
+    ) -> Self {
+        Self {
+            sample_size,
+            sample_count,
+            rng_seed,
+            max_cost,
+            objective,
+            target_block_bytesize,
+            target_block_size,
+        }
+    }
+
+    pub fn with_sample_size(&self, sample_size: u16) -> Self {
+        let mut cloned = self.clone();
+        cloned.sample_size = sample_size;
+        cloned
+    }
+
+    pub fn with_sample_count(&self, sample_count: u16) -> Self {
+        let mut cloned = self.clone();
+        cloned.sample_count = sample_count;
+        cloned
+    }
+}
+
 impl Default for CompressConfig {
     fn default() -> Self {
         let kib = 1 << 10;
