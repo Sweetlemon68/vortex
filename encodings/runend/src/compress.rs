@@ -68,7 +68,8 @@ fn runend_encode_primitive<T: NativePType>(elements: &[T]) -> (Vec<u64>, Vec<T>)
     }
     ends.push(end);
     values.push(last);
-
+    eprintln!("PR ends={:?}", ends);
+    eprintln!("PR values={:?}", values);
     (ends, values)
 }
 
@@ -127,6 +128,8 @@ fn runend_encode_nullable_primitive<T: NativePType>(
             values.push(e);
         }
     }
+    eprintln!("NPR ends={:?}", ends);
+    eprintln!("NPR values={:?}", values);
 
     (
         ends,
