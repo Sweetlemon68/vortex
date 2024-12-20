@@ -249,7 +249,7 @@ impl<'a> SamplingCompressor<'a> {
         }
 
         // Take a sample of the array, then ask codecs for their best compression estimate.
-        let sample = ChunkedArray::try_new(
+        let sample: ArrayData = ChunkedArray::try_new(
             stratified_slices(
                 array.len(),
                 self.options.sample_size,
@@ -263,6 +263,7 @@ impl<'a> SamplingCompressor<'a> {
         )?
         .into_canonical()?
         .into();
+        eprintln!("is constant: {:}", sample.is_constant());
 
         let best = find_best_compression(candidates, &sample, self)?
             .into_path()
