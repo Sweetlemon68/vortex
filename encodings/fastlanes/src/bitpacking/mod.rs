@@ -138,6 +138,9 @@ impl BitPackedArray {
         // SAFETY: maybe_null_slice points to buffer memory that outlives the lifetime of `self`.
         //  Unfortunately Rust cannot understand this, so we reconstruct the slice from raw parts
         //  to get it to reinterpret the lifetime.
+        assert!(packed_len < isize::MAX.try_into().unwrap());
+        assert!(!packed_ptr.is_null());
+        assert!(packed_ptr.is_aligned());
         unsafe { std::slice::from_raw_parts(packed_ptr, packed_len) }
     }
 
