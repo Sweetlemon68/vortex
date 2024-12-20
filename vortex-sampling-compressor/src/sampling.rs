@@ -18,7 +18,7 @@ pub fn stratified_slices(
         .map(|(start, stop)| stop - start)
         .collect();
 
-    partitions
+    let ret = partitions
         .into_iter()
         .zip(num_samples_per_partition)
         .map(|((start, stop), size)| {
@@ -29,7 +29,9 @@ pub fn stratified_slices(
             let random_start = rng.gen_range(start..=(stop - size));
             (random_start, random_start + size)
         })
-        .collect()
+        .collect::<Vec<_>>();
+    eprintln!("{:?}", ret);
+    ret
 }
 
 /// Split a range of array indices into as-equal-as-possible slices. If the provided `num_partitions` doesn't
