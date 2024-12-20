@@ -263,7 +263,7 @@ impl<'a> SamplingCompressor<'a> {
         )?
         .into_canonical()?
         .into();
-        eprintln!("is constant: {:}", sample.is_constant());
+        eprintln!("is constant: {:}, null count: {:}", sample.is_constant(), sample.null_count());
 
         let best = find_best_compression(candidates, &sample, self)?
             .into_path()
