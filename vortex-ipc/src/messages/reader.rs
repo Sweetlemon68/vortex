@@ -256,13 +256,10 @@ impl DTypeBufferReader {
                 Ok(Some(bytes.get_u32_le() as usize))
             }
             ReadState::ReadingFb => {
-                let schema = root::<fb::Message>(&bytes)?
-                    .header_as_schema()
-                    .ok_or_else(|| vortex_err!("Message was not a schema"))?;
                 self.dtype = DType::try_from(
-                    schema
-                        .dtype()
-                        .ok_or_else(|| vortex_err!(InvalidSerde: "Schema missing DType"))?,
+                    root::<fb::Message>(&bytes)?
+                        .header_as_dtype()
+                        .ok_or_else(|| vortex_err!("Message was not a schema"))?,
                 )?;
                 self.state = ReadState::Finished;
                 Ok(None)
