@@ -53,7 +53,7 @@ impl EncodingCompressor for RunEndCompressor {
         let primitive_array = array.clone().into_primitive()?;
         let (ends, values) = runend_encode(&primitive_array)?;
         let ends = downscale_integer_array(ends.into_array())?.into_primitive()?;
-        eprintln!("Ends: {:} len {:}; Values: {:} len {:}", ends, ends.len(), values, values.len());
+        eprintln!("Ends: {:?} len {:}; Values: {:?} len {:}", ends, vortex_array::ArrayLen::len(&ends), values, values.len());
 
         let compressed_ends = ctx
             .auxiliary("ends")
